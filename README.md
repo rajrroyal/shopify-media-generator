@@ -10,7 +10,7 @@ An embedded Shopify app for generating product photography with AI, reviewing re
 - Shopify OAuth, product sync, product media, and subscription service boundaries
 - OpenAI prompt and image generation integration
 - Credit ledger with automatic refunds when generation fails
-- Local demo mode, SQLite, and filesystem media storage
+- Local demo mode, PostgreSQL-ready database configuration, and filesystem media storage
 - Production-ready environment seams for PostgreSQL, Redis, and S3
 
 ## Project layout
@@ -57,6 +57,22 @@ npm run dev
 
 Open `http://localhost:5173`. The frontend defaults to demo data if the API is unavailable.
 
+### PostgreSQL
+
+The backend reads its database from `DATABASE_URL` in `backend/.env`.
+
+```env
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DB_NAME
+```
+
+For local PostgreSQL, create the database and user first, then run:
+
+```bash
+cd backend
+python manage.py migrate
+python manage.py seed_demo
+```
+
 ## Required configuration
 
 See [`backend/.env.example`](backend/.env.example). For live Shopify use, create a public app in the Shopify Partner Dashboard and configure:
@@ -76,4 +92,3 @@ Webhooks should point to:
 - Validate Shopify session tokens on every embedded request. The included dev header fallback is intentionally disabled unless `DEBUG=true`.
 - Configure Shopify billing return URLs and webhook subscriptions.
 - Run workers separately from the web process.
-

@@ -8,7 +8,7 @@ httpx>=0.28,<0.29
 PyJWT[crypto]>=2.10,<3
 python-dotenv>=1.1,<2
 dj-database-url>=3,<4
+psycopg[binary]>=3.2,<4
 django-storages[s3]>=1.14,<2
 Pillow>=11,<12
 gunicorn>=23,<24
-
