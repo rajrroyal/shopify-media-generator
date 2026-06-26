@@ -1,0 +1,14 @@
+Django>=5.2,<5.3
+djangorestframework>=3.16,<3.17
+django-cors-headers>=4.7,<5
+celery>=5.5,<5.6
+redis>=6,<7
+openai>=1.93,<2
+httpx>=0.28,<0.29
+PyJWT[crypto]>=2.10,<3
+python-dotenv>=1.1,<2
+dj-database-url>=3,<4
+django-storages[s3]>=1.14,<2
+Pillow>=11,<12
+gunicorn>=23,<24
+
