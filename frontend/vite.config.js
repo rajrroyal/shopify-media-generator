@@ -19,6 +19,11 @@ export default defineConfig(({mode}) => {
     ],
     server: {
       port: 5173,
+      allowedHosts: [
+        'localhost',
+        '127.0.0.1',
+        'media-generator.mailmerit.com',
+      ],
       proxy: {
         '/api': 'http://localhost:8000',
         '/media': 'http://localhost:8000',

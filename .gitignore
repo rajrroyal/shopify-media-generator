@@ -8,3 +8,11 @@ backend/staticfiles/
 frontend/node_modules/
 frontend/dist/
 .DS_Store
+
+# Deployment configurations (environment-specific)
+ecosystem.config.js
+apache-*.conf
+supervisor-*.conf
+logs/
+APACHE_DEPLOYMENT.md
+DEPLOYMENT.md
