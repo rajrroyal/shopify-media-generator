@@ -2,8 +2,50 @@ import uuid
 
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.utils import timezone
+
+
+class SubscriptionPlan(models.Model):
+    slug = models.SlugField(max_length=50, unique=True)
+    name = models.CharField(max_length=100)
+    price = models.DecimalField(
+        max_digits=8, decimal_places=2, validators=[MinValueValidator(0)]
+    )
+    monthly_credits = models.PositiveIntegerField()
+    description = models.CharField(max_length=255, blank=True)
+    featured = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "price", "id"]
+
+    def __str__(self):
+        return f"{self.name} (${self.price}/month)"
+
+
+class CreditPack(models.Model):
+    slug = models.SlugField(max_length=50, unique=True)
+    name = models.CharField(max_length=100)
+    price = models.DecimalField(
+        max_digits=8, decimal_places=2, validators=[MinValueValidator(0.01)]
+    )
+    credits = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    description = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "price", "id"]
+
+    def __str__(self):
+        return f"{self.name} ({self.credits} credits)"
 
 
 class ShopManager(BaseUserManager):
@@ -20,17 +62,20 @@ class ShopManager(BaseUserManager):
 
 
 class Shop(AbstractBaseUser, PermissionsMixin):
-    class Plan(models.TextChoices):
-        FREE = "free", "Free"
-        STARTER = "starter", "Starter"
-        PRO = "pro", "Pro"
-        GROWTH = "growth", "Growth"
-
     shop_domain = models.CharField(max_length=255, unique=True)
     access_token = models.TextField(blank=True)
     scope = models.TextField(blank=True)
-    plan = models.CharField(max_length=20, choices=Plan.choices, default=Plan.FREE)
-    credits_balance = models.PositiveIntegerField(default=10)
+    plan = models.ForeignKey(
+        SubscriptionPlan,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="shops",
+    )
+    plan_credits_balance = models.PositiveIntegerField(default=0)
+    purchased_credits_balance = models.PositiveIntegerField(default=0)
+    shopify_subscription_id = models.CharField(max_length=255, blank=True)
+    next_plan_credit_reset_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     installed_at = models.DateTimeField(default=timezone.now)
@@ -42,25 +87,9 @@ class Shop(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return self.shop_domain
 
-
-class ProductSnapshot(models.Model):
-    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="products")
-    shopify_product_id = models.CharField(max_length=100)
-    title = models.CharField(max_length=500)
-    description = models.TextField(blank=True)
-    vendor = models.CharField(max_length=255, blank=True)
-    product_type = models.CharField(max_length=255, blank=True)
-    status = models.CharField(max_length=50, default="ACTIVE")
-    tags = models.JSONField(default=list)
-    images = models.JSONField(default=list)
-    variants = models.JSONField(default=list)
-    synced_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["shop", "shopify_product_id"], name="unique_shop_product")
-        ]
-        ordering = ["title"]
+    @property
+    def credits_balance(self):
+        return self.plan_credits_balance + self.purchased_credits_balance
 
 
 class GenerationJob(models.Model):
@@ -75,7 +104,8 @@ class GenerationJob(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="generation_jobs")
-    product = models.ForeignKey(ProductSnapshot, on_delete=models.PROTECT, related_name="generation_jobs")
+    shopify_product_id = models.CharField(max_length=100)
+    product_data = models.JSONField(default=dict)
     status = models.CharField(max_length=30, choices=Status.choices, default=Status.DRAFT)
     source_images = models.JSONField(default=list)
     credits_used = models.PositiveIntegerField(default=0)
@@ -135,9 +165,54 @@ class CreditTransaction(models.Model):
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="credit_transactions")
     kind = models.CharField(max_length=10, choices=Kind.choices)
     amount = models.PositiveIntegerField()
+    plan_amount = models.PositiveIntegerField(default=0)
+    purchased_amount = models.PositiveIntegerField(default=0)
     reason = models.CharField(max_length=255)
     job = models.ForeignKey(GenerationJob, null=True, blank=True, on_delete=models.SET_NULL)
+    credit_purchase = models.OneToOneField(
+        "CreditPurchase",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="credit_transaction",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class CreditPurchase(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        ACTIVE = "ACTIVE", "Active"
+        DECLINED = "DECLINED", "Declined"
+        EXPIRED = "EXPIRED", "Expired"
+        ERROR = "ERROR", "Error"
+
+    reference = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="credit_purchases")
+    pack = models.ForeignKey(
+        CreditPack,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="purchases",
+    )
+    pack_name = models.CharField(max_length=100)
+    credits = models.PositiveIntegerField()
+    amount = models.DecimalField(max_digits=8, decimal_places=2)
+    currency = models.CharField(max_length=3, default="USD")
+    shopify_purchase_id = models.CharField(max_length=255, null=True, blank=True, unique=True)
+    shopify_name = models.CharField(max_length=255)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    credited_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.shop} — {self.pack_name} — {self.status}"

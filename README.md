@@ -7,10 +7,10 @@ An embedded Shopify app for generating product photography with AI, reviewing re
 - React + React Router + Shopify Polaris merchant UI
 - Django + Django REST Framework API
 - Celery tasks with Redis configuration
-- Shopify OAuth, product sync, product media, and subscription service boundaries
+- Shopify OAuth, live catalog reads, product media, and subscription service boundaries
 - OpenAI prompt and image generation integration
 - Credit ledger with automatic refunds when generation fails
-- Local demo mode, PostgreSQL-ready database configuration, and filesystem media storage
+- Local demo mode, PostgreSQL-ready generation storage, and filesystem media storage
 - Production-ready environment seams for PostgreSQL, Redis, and S3
 
 ## Project layout
@@ -55,7 +55,13 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The frontend defaults to demo data if the API is unavailable.
+Open `http://localhost:5173`. Set `VITE_DEMO_MODE=true` only when you explicitly
+want the standalone demo catalog.
+
+Product catalog data is always read directly from the Shopify Admin API. PixelMint
+stores generation jobs, prompts, generated images, credits, and a small immutable
+product snapshot inside each generation job for historical display; it does not
+maintain or synchronize a local product catalog.
 
 ### PostgreSQL
 
@@ -84,6 +90,11 @@ See [`backend/.env.example`](backend/.env.example). For live Shopify use, create
 Webhooks should point to:
 
 - `/api/webhooks/app-uninstalled/`
+- `/api/webhooks/app-purchases-one-time-update/`
+
+Subscription plans and one-time credit packs are managed in Django admin under
+**Subscription plans** and **Credit packs**. Plan credits reset with the Shopify
+billing period; purchased credits are stored separately and roll over.
 
 ## Production notes
 

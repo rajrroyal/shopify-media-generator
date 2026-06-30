@@ -7,6 +7,10 @@ backend/media/
 backend/staticfiles/
 frontend/node_modules/
 frontend/dist/
+node_modules/
+.shopify-cli/
+.shopify/
+dist/
 .DS_Store
 
 # Deployment configurations (environment-specific)

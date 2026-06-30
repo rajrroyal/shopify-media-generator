@@ -1,0 +1,26 @@
+client_id = "36e84f52405074106fedc77a4622170f"
+name = "PixelMint AI"
+application_url = "https://media-generator.mailmerit.com"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = false
+
+[webhooks]
+api_version = "2026-04"
+
+[[webhooks.subscriptions]]
+topics = ["app/uninstalled"]
+uri = "https://media-api.mailmerit.com/api/webhooks/app-uninstalled/"
+
+[[webhooks.subscriptions]]
+topics = ["app_purchases_one_time/update"]
+uri = "https://media-api.mailmerit.com/api/webhooks/app-purchases-one-time-update/"
+
+[access_scopes]
+scopes = "read_products,write_products,read_files,write_files"
+
+[auth]
+redirect_urls = [
+  "https://media-api.mailmerit.com/api/auth/shopify/callback/"
+]

@@ -1,11 +1,13 @@
 import {useEffect, useState} from 'react';
 import {
-  Badge, Banner, Button, Checkbox, EmptyState, ProgressBar,
+  Badge, Banner, Button, Checkbox, EmptyState, Frame, ProgressBar,
   Select, TextField, Toast,
 } from '@shopify/polaris';
 import {Link, NavLink, Route, Routes, useNavigate, useParams} from 'react-router-dom';
 import {api} from './api';
 import {demoJobs, demoProducts, generatedImages, promptIdeas} from './demo';
+
+const demoMode = import.meta.env.VITE_DEMO_MODE === 'true';
 
 const navigation = [
   ['/', 'Overview', '◈'],
@@ -30,74 +32,174 @@ function shopifyTo(path) {
   return `${path}${shopifySearch()}`;
 }
 
+function actionProductId() {
+  const resourceId = new URLSearchParams(location.search).get('id');
+  if (!resourceId) return undefined;
+  const productId = resourceId.replace(/\/+$/, '').split('/').pop();
+  return /^\d+$/.test(productId) ? productId : undefined;
+}
+
+function promptText(value = '') {
+  return value
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function promptTitle(value, index) {
+  const text = promptText(value);
+  const scene = text.match(/^(.{3,55}?)(?:\s+photograph|\s+photo|\s+image|\s+of\b)/i)?.[1];
+  const title = scene || text.split(' ').slice(0, 5).join(' ');
+  return title || `Custom idea ${index + 1}`;
+}
+
+function PromptEditor({editor, onChange, onSave, onClose}) {
+  useEffect(() => {
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
+  const editing = editor.index !== null;
+  return <div className="prompt-modal-backdrop" onMouseDown={event => {
+    if (event.target === event.currentTarget) onClose();
+  }}>
+    <section className="prompt-modal" role="dialog" aria-modal="true" aria-labelledby="prompt-editor-title">
+      <header>
+        <div>
+          <span className="eyebrow">{editing ? 'EDIT IDEA' : 'NEW IDEA'}</span>
+          <h2 id="prompt-editor-title">{editing ? 'Refine this direction' : 'Add a custom direction'}</h2>
+        </div>
+        <button className="prompt-modal-close" onClick={onClose} aria-label="Close prompt editor">×</button>
+      </header>
+      <p>Describe the scene, composition, lighting and details you want PixelMint to preserve.</p>
+      <label className="prompt-editor-field">
+        <span>Image prompt</span>
+        <textarea
+          autoFocus
+          maxLength={4000}
+          rows={10}
+          value={editor.value}
+          onChange={event => onChange(event.target.value)}
+          placeholder="Example: Clean studio photograph on a warm neutral backdrop with soft directional light…"
+        />
+      </label>
+      <div className="prompt-editor-meta">
+        <span className={editor.error ? 'prompt-editor-error' : ''}>{editor.error || 'Be specific, but keep the product true to its original appearance.'}</span>
+        <span>{editor.value.length.toLocaleString()} / 4,000</span>
+      </div>
+      <footer>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="primary" onClick={onSave}>{editing ? 'Save changes' : 'Add direction'}</Button>
+      </footer>
+    </section>
+  </div>;
+}
+
 function App() {
-  const [products, setProducts] = useState(demoProducts);
-  const [jobs, setJobs] = useState(demoJobs);
-  const [account, setAccount] = useState({plan: 'Pro', credits_balance: 86, images_this_month: 42});
-  const [demo, setDemo] = useState(false);
+  const [products, setProducts] = useState(demoMode ? demoProducts : []);
+  const [jobs, setJobs] = useState(demoMode ? demoJobs : []);
+  const [account, setAccount] = useState(demoMode
+    ? {shop_name: 'Aurelia Goods', shop_domain: 'demo-store.myshopify.com', plan: 'pro', credits_balance: 86, credit_limit: 400, images_this_month: 42}
+    : {shop_name: '', shop_domain: '', plan: 'free', credits_balance: 0, credit_limit: 10, images_this_month: 0, products_enhanced: 0});
+  const [loading, setLoading] = useState(!demoMode);
   const [apiError, setApiError] = useState('');
 
   useEffect(() => {
-    Promise.all([api.me(), api.products(), api.jobs()])
-      .then(([me, productData, jobData]) => {
-        setAccount(me);
-        if (productData.length) setProducts(productData);
-        if (jobData.length) setJobs(jobData);
-      })
-      .catch(error => {
+    if (demoMode) return;
+    async function loadHistory() {
+      try {
+        setJobs(await api.jobs());
+      } catch (error) {
         setApiError(error.message);
-        setDemo(true);
-      });
+      } finally {
+        setLoading(false);
+      }
+    }
+    async function loadAccount() {
+      try {
+        setAccount(await api.me());
+      } catch (error) {
+        setApiError(error.message);
+      }
+    }
+    loadHistory();
+    loadAccount();
   }, []);
 
+  const storeName = account.shop_name || account.shop_domain || 'Your store';
+  const initial = storeName.charAt(0).toUpperCase();
+
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <Link className="brand" to={shopifyTo('/')}>
-          <span className="brand-mark">P</span>
-          <span>PixelMint <b>AI</b></span>
-        </Link>
-        <nav>
-          {navigation.map(([to, label, icon]) => (
-            <NavLink key={to} to={shopifyTo(to)} end={to === '/'} className={({isActive}) => isActive ? 'nav-link active' : 'nav-link'}>
-              <span>{icon}</span>{label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="sidebar-spacer" />
-        <div className="credit-mini">
-          <div className="credit-row"><span>Monthly credits</span><strong>{account.credits_balance}</strong></div>
-          <ProgressBar progress={Math.min(100, account.credits_balance)} size="small" tone="success" />
-          <span className="muted">Resets in 12 days</span>
-        </div>
-        <div className="store-chip"><span className="store-avatar">A</span><span><strong>Aurelia Goods</strong><small>demo-store.myshopify.com</small></span><span>•••</span></div>
-      </aside>
-      <main className="main">
-        {demo && <div className="demo-bar">API fallback mode · {apiError || 'connect the Django API to use your store data'}</div>}
-        <Routes>
-          <Route path="/" element={<Dashboard account={account} jobs={jobs} />} />
-          <Route path="/products" element={<Products products={products} />} />
-          <Route path="/generate" element={<Generate products={products} setJobs={setJobs} account={account} setAccount={setAccount} demo={demo} />} />
-          <Route path="/generate/:productId" element={<Generate products={products} setJobs={setJobs} account={account} setAccount={setAccount} demo={demo} />} />
-          <Route path="/history" element={<History jobs={jobs} />} />
-          <Route path="/billing" element={<Billing account={account} />} />
-        </Routes>
-      </main>
-    </div>
+    <Frame>
+      <div className="app-shell">
+        <header className="topbar">
+          <Link className="brand" to={shopifyTo('/')}>
+            <span className="brand-mark">P</span>
+            <span>PixelMint <b>AI</b></span>
+          </Link>
+          <nav className="top-nav" aria-label="Primary navigation">
+            {navigation.map(([to, label, icon]) => (
+              <NavLink key={to} to={shopifyTo(to)} end={to === '/'} className={({isActive}) => isActive ? 'nav-link active' : 'nav-link'}>
+                <span>{icon}</span>{label}
+              </NavLink>
+            ))}
+          </nav>
+          <div className="topbar-account">
+            <Link className="credit-pill" to={shopifyTo('/billing')}>
+              <span>✦</span><strong>{account.credits_balance}</strong><small>credits</small>
+            </Link>
+            <div className="store-chip">
+              <span className="store-avatar">{initial}</span>
+              <span><strong>{storeName}</strong><small>{account.shop_domain}</small></span>
+            </div>
+          </div>
+        </header>
+        <main className="main">
+          {loading && <AppMessage tone="info" title="Opening your workspace" message="Loading your store details and generation history…" />}
+          {demoMode && <AppMessage tone="info" title="Preview mode" message="Shopify publishing is disabled while demo mode is active." />}
+          {apiError && <AppMessage tone="critical" title="We couldn’t load your store" message={apiError} onDismiss={() => setApiError('')} />}
+          <Routes>
+            <Route path="/" element={<Dashboard account={account} jobs={jobs} loading={loading} />} />
+            <Route path="/products" element={<Products products={products} setProducts={setProducts} />} />
+            <Route path="/generate" element={<Generate products={products} setProducts={setProducts} setJobs={setJobs} account={account} setAccount={setAccount} demo={demoMode} />} />
+            <Route path="/generate/:productId" element={<Generate products={products} setProducts={setProducts} setJobs={setJobs} account={account} setAccount={setAccount} demo={demoMode} />} />
+            <Route path="/history" element={<History jobs={jobs} />} />
+            <Route path="/billing" element={<Billing account={account} />} />
+          </Routes>
+        </main>
+      </div>
+    </Frame>
   );
+}
+
+function AppMessage({tone, title, message, onDismiss}) {
+  return <div className={`app-message ${tone}`}>
+    <span className="message-icon">{tone === 'critical' ? '!' : 'i'}</span>
+    <div><strong>{title}</strong><small>{message}</small></div>
+    {onDismiss && <button onClick={onDismiss} aria-label="Dismiss message">×</button>}
+  </div>;
 }
 
 function PageHeader({eyebrow, title, description, action}) {
   return <header className="page-header"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1>{description && <p>{description}</p>}</div>{action}</header>;
 }
 
-function Dashboard({account, jobs}) {
+function Dashboard({account, jobs, loading}) {
+  const today = new Intl.DateTimeFormat(undefined, {weekday: 'long', month: 'long', day: 'numeric'}).format(new Date()).toUpperCase();
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const merchant = account.shop_name || account.shop_domain?.split('.')[0] || 'there';
   return <div className="page">
-    <PageHeader eyebrow="THURSDAY, JUNE 25" title="Good morning, Aurelia." description="Your catalog has a few fresh opportunities waiting." action={<Button variant="primary" url={shopifyTo('/generate')}>✦ Create product images</Button>} />
+    <PageHeader eyebrow={today} title={`${greeting}, ${merchant}.`} description={loading ? 'Loading your current store…' : 'Your catalog is ready for something fresh.'} action={<Button variant="primary" url={shopifyTo('/generate')}>✦ Create product images</Button>} />
     <section className="metrics">
-      <div className="metric accent"><span className="metric-icon">✦</span><span>Credits available</span><strong>{account.credits_balance}</strong><small>of 400 this month</small></div>
-      <div className="metric"><span className="metric-icon mint">↗</span><span>Images this month</span><strong>{account.images_this_month || 42}</strong><small className="positive">+18% from last month</small></div>
-      <div className="metric"><span className="metric-icon sand">▦</span><span>Products enhanced</span><strong>12</strong><small>across 8 collections</small></div>
+      <div className="metric accent"><span className="metric-icon">✦</span><span>Credits available</span><strong>{account.credits_balance}</strong><small>of {account.credit_limit || 10} this month</small></div>
+      <div className="metric"><span className="metric-icon mint">↗</span><span>Images this month</span><strong>{account.images_this_month || 0}</strong><small>completed generations</small></div>
+      <div className="metric"><span className="metric-icon sand">▦</span><span>Products enhanced</span><strong>{account.products_enhanced || 0}</strong><small>published to Shopify</small></div>
     </section>
     <section className="split">
       <div className="panel">
@@ -111,39 +213,85 @@ function Dashboard({account, jobs}) {
     </section>
     <section className="panel recent">
       <div className="panel-title"><div><span className="eyebrow">RECENT WORK</span><h2>Latest generations</h2></div><Button variant="plain" url={shopifyTo('/history')}>View all</Button></div>
-      <div className="job-list">{jobs.slice(0, 3).map(job => <JobRow job={job} key={job.id} />)}</div>
+      {jobs.length
+        ? <div className="job-list">{jobs.slice(0, 3).map(job => <JobRow job={job} key={job.id} />)}</div>
+        : <div className="inline-empty"><span>✦</span><div><strong>Your first image set starts here</strong><small>Choose a Shopify product and create a polished campaign in minutes.</small></div><Button url={shopifyTo('/products')}>Browse products</Button></div>}
     </section>
   </div>;
 }
 
 function JobRow({job}) {
   const image = job.images?.[0]?.url || job.product.images?.[0]?.url;
-  return <div className="job-row"><img src={image} /><div><strong>{job.product.title}</strong><small>{new Date(job.created_at).toLocaleDateString()} · {job.images?.length || 0} images</small></div><Badge tone={job.status === 'completed' ? 'success' : 'attention'}>{job.status}</Badge><span className="muted">{job.credits_used} credits</span><button className="round-button">→</button></div>;
+  return <div className="job-row">{image ? <img src={image} alt="" /> : <span className="job-placeholder">✦</span>}<div><strong>{job.product.title}</strong><small>{new Date(job.created_at).toLocaleDateString()} · {job.images?.length || 0} images</small></div><Badge tone={job.status === 'completed' ? 'success' : 'attention'}>{job.status}</Badge><span className="muted">{job.credits_used} credits</span></div>;
 }
 
-function Products({products}) {
+function Products({products, setProducts}) {
   const [query, setQuery] = useState('');
-  const filtered = products.filter(p => p.title.toLowerCase().includes(query.toLowerCase()));
+  const [status, setStatus] = useState('ALL');
+  const [syncing, setSyncing] = useState(false);
+  const [loading, setLoading] = useState(!products.length);
+  const [toast, setToast] = useState('');
+  const filtered = products.filter(p =>
+    p.title.toLowerCase().includes(query.toLowerCase()) && (status === 'ALL' || p.status === status)
+  );
+  async function sync() {
+    setSyncing(true);
+    try {
+      setProducts(await api.products());
+      setToast('Products refreshed from Shopify.');
+    } catch (error) { setToast(error.message); }
+    finally { setSyncing(false); }
+  }
+  useEffect(() => {
+    let active = true;
+    if (products.length) {
+      setLoading(false);
+      return () => { active = false; };
+    }
+    api.products()
+      .then(data => {
+        if (active) setProducts(data);
+      })
+      .catch(error => {
+        if (active) setToast(error.message);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [products.length, setProducts]);
   return <div className="page">
-    <PageHeader eyebrow="YOUR CATALOG" title="Choose a product" description="Pick a product and we’ll build the creative direction together." />
-    <div className="toolbar"><div className="search"><TextField label="Search products" labelHidden value={query} onChange={setQuery} placeholder="Search products…" autoComplete="off" /></div><Select label="Status" labelHidden options={['All products', 'Active', 'Draft']} /><Button>Sync Shopify</Button></div>
-    <div className="product-grid">{filtered.map(product => <ProductCard product={product} key={product.id} />)}</div>
+    <PageHeader eyebrow="LIVE SHOPIFY CATALOG" title="Choose a product" description="Products are loaded directly from Shopify and are never copied into PixelMint." />
+    <div className="catalog-note"><span>✓</span><div><strong>Always current</strong><small>Changes made in Shopify appear here when you refresh.</small></div></div>
+    <div className="toolbar"><div className="search"><TextField label="Search products" labelHidden value={query} onChange={setQuery} placeholder="Search products…" autoComplete="off" /></div><Select label="Status" labelHidden value={status} onChange={setStatus} options={[{label: 'All products', value: 'ALL'}, {label: 'Active', value: 'ACTIVE'}, {label: 'Draft', value: 'DRAFT'}]} /><Button loading={syncing} onClick={sync}>Refresh products</Button></div>
+    {loading
+      ? <div className="catalog-loading"><span className="loading-orb">✦</span><div><strong>Fetching your current Shopify catalog</strong><small>This is a direct API request—no local product cache or WebSocket.</small></div></div>
+      : filtered.length
+        ? <div className="product-grid">{filtered.map(product => <ProductCard product={product} key={product.id} />)}</div>
+        : <EmptyState heading={products.length ? 'No products match these filters' : 'No Shopify products found'} action={{content: 'Refresh products', onAction: sync}} />}
+    {toast && <Toast content={toast} onDismiss={() => setToast('')} />}
   </div>;
 }
 
 function ProductCard({product}) {
+  const navigate = useNavigate();
   return <article className="product-card">
-    <div className="product-image"><img src={product.images?.[0]?.url} /><Badge tone={product.status === 'ACTIVE' ? 'success' : 'attention'}>{product.status}</Badge></div>
-    <div className="product-copy"><span>{product.vendor}</span><h3>{product.title}</h3><small>{product.product_type}</small><Button variant="primary" url={shopifyTo(`/generate/${product.id}`)}>Create images</Button></div>
+    <div className="product-image">{product.images?.[0]?.url ? <img src={product.images[0].url} alt="" /> : <span className="image-placeholder">No product image</span>}<Badge tone={product.status === 'ACTIVE' ? 'success' : 'attention'}>{product.status}</Badge></div>
+    <div className="product-copy"><span>{product.vendor}</span><h3>{product.title}</h3><small>{product.product_type}</small><Button variant="primary" onClick={() => navigate(shopifyTo(`/generate/${product.id}`))}>Create images</Button></div>
   </article>;
 }
 
-function Generate({products, setJobs, account, setAccount, demo}) {
-  const {productId} = useParams();
+function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
+  const {productId: routeProductId} = useParams();
+  const productId = routeProductId || actionProductId();
   const navigate = useNavigate();
-  const initial = products.find(p => String(p.id) === productId) || products[0];
-  const [step, setStep] = useState(1);
+  const initial = products.find(p => String(p.id) === productId)
+    || (!productId ? products[0] : undefined);
+  const [step, setStep] = useState(productId ? 2 : 1);
   const [product, setProduct] = useState(initial);
+  const [productLoading, setProductLoading] = useState(!initial);
+  const [productError, setProductError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [references, setReferences] = useState([0]);
   const [prompts, setPrompts] = useState(promptIdeas.map((prompt, id) => ({id, prompt, is_selected: id < 4})));
   const [results, setResults] = useState([]);
@@ -151,10 +299,97 @@ function Generate({products, setJobs, account, setAccount, demo}) {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
   const [jobId, setJobId] = useState(null);
+  const [generationProgress, setGenerationProgress] = useState(0);
+  const [generationMessage, setGenerationMessage] = useState('Preparing your product references…');
+  const [promptEditor, setPromptEditor] = useState(null);
 
   const selectedPromptCount = prompts.filter(p => p.is_selected).length;
+  const allPromptsSelected = prompts.length > 0 && selectedPromptCount === prompts.length;
+
+  useEffect(() => {
+    let active = true;
+    async function loadProductSelection() {
+      const existing = products.find(item => String(item.id) === productId)
+        || (!productId ? products[0] : null);
+      if (existing) {
+        if (!active) return;
+        setProduct(existing);
+        setReferences(existing.images?.length ? [0] : []);
+        setProductLoading(false);
+        setProductError('');
+        return;
+      }
+
+      setProductLoading(true);
+      setProductError('');
+      try {
+        if (demo) throw new Error('No demo products are available.');
+        if (productId) {
+          const selectedProduct = await api.product(productId);
+          if (!active) return;
+          setProduct(selectedProduct);
+          setReferences(selectedProduct.images?.length ? [0] : []);
+          setProducts(current => current.some(item => item.id === selectedProduct.id)
+            ? current
+            : [selectedProduct, ...current]);
+        } else {
+          const liveProducts = await api.products();
+          if (!active) return;
+          setProducts(liveProducts);
+          setProduct(liveProducts[0] || null);
+          setReferences(liveProducts[0]?.images?.length ? [0] : []);
+        }
+      } catch (error) {
+        if (active) setProductError(error.message);
+      } finally {
+        if (active) setProductLoading(false);
+      }
+    }
+    loadProductSelection();
+    return () => { active = false; };
+  }, [demo, loadAttempt, productId, products, setProducts]);
+
+  function chooseProduct(item) {
+    setProduct(item);
+    setReferences(item.images?.length ? [0] : []);
+    setJobId(null);
+  }
+
+  function togglePrompt(index) {
+    setPrompts(current => current.map((prompt, promptIndex) =>
+      promptIndex === index ? {...prompt, is_selected: !prompt.is_selected} : prompt
+    ));
+  }
+
+  function toggleAllPrompts() {
+    const nextValue = !allPromptsSelected;
+    setPrompts(current => current.map(prompt => ({...prompt, is_selected: nextValue})));
+  }
+
+  function openPromptEditor(index = null) {
+    setPromptEditor({
+      index,
+      value: index === null ? '' : prompts[index].prompt,
+      error: '',
+    });
+  }
+
+  function savePrompt() {
+    const value = promptEditor.value.trim();
+    if (!value) {
+      setPromptEditor(current => ({...current, error: 'Enter a prompt before saving.'}));
+      return;
+    }
+    setPrompts(current => promptEditor.index === null
+      ? [...current, {prompt: value, is_selected: true}]
+      : current.map((prompt, index) =>
+          index === promptEditor.index ? {...prompt, prompt: value} : prompt
+        ));
+    setPromptEditor(null);
+  }
 
   async function createPrompts() {
+    if (!product) return setToast('Choose a product first.');
     setBusy(true);
     try {
       if (!demo) {
@@ -170,26 +405,67 @@ function Generate({products, setJobs, account, setAccount, demo}) {
 
   async function createImages() {
     if (selectedPromptCount > account.credits_balance) return setToast('Not enough credits for this generation.');
-    setBusy(true); setStep(4);
+    if (!demo && !jobId) return setToast('Build creative directions before generating images.');
+    setBusy(true); setStep(4); setGenerationProgress(8);
+    setGenerationMessage('Preparing your product references…');
     try {
       if (!demo && jobId) {
         await api.generateImages(jobId, prompts);
-        await new Promise(resolve => setTimeout(resolve, 2500));
+        const terminal = new Set(['completed', 'partial', 'failed']);
+        let job;
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+          await new Promise(resolve => setTimeout(resolve, 2500));
+          job = await api.job(jobId);
+          setGenerationProgress(Math.min(94, 16 + attempt * 2));
+          setGenerationMessage(job.status === 'processing'
+            ? 'Creating polished scenes from your selected directions…'
+            : 'Your generation is queued and will begin shortly…');
+          if (terminal.has(job.status)) break;
+        }
+        if (!job || !terminal.has(job.status)) throw new Error('Generation is taking longer than expected. Check History in a moment.');
+        const made = job.images.filter(image => image.status === 'completed' && image.url);
+        if (!made.length) throw new Error(job.error_message || job.images.find(image => image.error_message)?.error_message || 'Image generation failed.');
+        setResults(made);
+        setSelected(made.map(image => image.id));
+        setJobs(current => [job, ...current.filter(item => item.id !== job.id)]);
+        setAccount(await api.me());
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        const made = generatedImages.slice(0, selectedPromptCount).map((url, index) => ({id: index + 1, url, status: 'completed'}));
+        setResults(made);
+        setSelected(made.map(image => image.id));
+        setAccount(value => ({...value, credits_balance: value.credits_balance - selectedPromptCount}));
       }
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      const made = generatedImages.slice(0, selectedPromptCount).map((url, index) => ({id: index + 1, url, status: 'completed'}));
-      setResults(made); setSelected(made.map(image => image.id));
-      setAccount(value => ({...value, credits_balance: value.credits_balance - selectedPromptCount}));
+      setGenerationProgress(100);
+      setGenerationMessage('Your image set is ready to review.');
       setStep(5);
     } catch (error) { setToast(error.message); setStep(3); }
     finally { setBusy(false); }
   }
 
-  function finish() {
-    const job = {id: Date.now(), product, status: 'completed', created_at: new Date().toISOString(), credits_used: selectedPromptCount, images: results.filter(i => selected.includes(i.id))};
-    setJobs(current => [job, ...current]);
-    setToast(demo ? 'Demo complete — connect Shopify to publish these images.' : 'Images added to your product.');
-    setTimeout(() => navigate(shopifyTo('/history')), 1200);
+  async function finish() {
+    setBusy(true);
+    try {
+      if (demo) {
+        const job = {id: Date.now(), product, status: 'completed', created_at: new Date().toISOString(), credits_used: selectedPromptCount, images: results.filter(i => selected.includes(i.id))};
+        setJobs(current => [job, ...current]);
+        setToast('Demo complete — connect Shopify to publish these images.');
+      } else {
+        const job = await api.addToShopify(jobId, selected);
+        setJobs(current => [job, ...current.filter(item => item.id !== job.id)]);
+        setToast('Images added to your Shopify product.');
+      }
+      setTimeout(() => navigate(shopifyTo('/history')), 1000);
+    } catch (error) { setToast(error.message); }
+    finally { setBusy(false); }
+  }
+
+  if (productLoading) {
+    return <div className="page"><div className="catalog-loading"><span className="loading-orb">✦</span><div><strong>{productId ? 'Loading your selected Shopify product' : 'Loading products from Shopify'}</strong><small>Preparing the Create workspace…</small></div></div></div>;
+  }
+
+  if (!product) {
+    return <div className="page"><section className="load-error"><span>!</span><div><h2>We couldn’t load a product</h2><p>{productError || 'No products are currently available in this Shopify store.'}</p></div><div className="load-error-actions"><Button onClick={() => setLoadAttempt(value => value + 1)}>Try again</Button><Button variant="primary" onClick={() => navigate(shopifyTo('/products'))}>Browse Shopify products</Button></div></section></div>;
   }
 
   return <div className="page wizard-page">
@@ -197,29 +473,56 @@ function Generate({products, setJobs, account, setAccount, demo}) {
     <div className="stepper">{['Product', 'References', 'Directions', 'Generating', 'Review'].map((label, i) => <div className={step >= i + 1 ? 'step active' : 'step'} key={label}><span>{step > i + 1 ? '✓' : i + 1}</span><small>{label}</small></div>)}</div>
     {step === 1 && <section className="wizard-card">
       <span className="eyebrow">STEP 1 OF 5</span><h2>What are we photographing?</h2>
-      <div className="compact-products">{products.map(item => <button className={product.id === item.id ? 'compact-product selected' : 'compact-product'} onClick={() => setProduct(item)} key={item.id}><img src={item.images?.[0]?.url} /><span><strong>{item.title}</strong><small>{item.vendor} · {item.product_type}</small></span><b>{product.id === item.id ? '✓' : ''}</b></button>)}</div>
+      <div className="compact-products">{products.map(item => <button className={product.id === item.id ? 'compact-product selected' : 'compact-product'} onClick={() => chooseProduct(item)} key={item.id}>{item.images?.[0]?.url ? <img src={item.images[0].url} alt="" /> : <span className="image-placeholder">No image</span>}<span><strong>{item.title}</strong><small>{item.vendor} · {item.product_type}</small></span><b>{product.id === item.id ? '✓' : ''}</b></button>)}</div>
       <div className="wizard-actions"><span /><Button variant="primary" onClick={() => setStep(2)}>Continue →</Button></div>
     </section>}
     {step === 2 && <section className="wizard-card">
       <span className="eyebrow">STEP 2 OF 5</span><h2>Choose your references</h2><p className="lead">We’ll use these to keep shape, color, materials and branding faithful.</p>
-      <div className="reference-grid">{product.images.map((image, i) => <button onClick={() => setReferences(current => current.includes(i) ? current.filter(x => x !== i) : [...current, i])} className={references.includes(i) ? 'reference selected' : 'reference'} key={image.url}><img src={image.url} /><span>{references.includes(i) ? '✓ Selected' : 'Select'}</span></button>)}<button className="reference upload"><b>＋</b><span>Upload a reference</span></button></div>
+      {product.images?.length ? <div className="reference-grid">{product.images.map((image, i) => <button onClick={() => setReferences(current => current.includes(i) ? current.filter(x => x !== i) : [...current, i])} className={references.includes(i) ? 'reference selected' : 'reference'} key={image.url}><img src={image.url} alt="" /><span>{references.includes(i) ? '✓ Selected' : 'Select'}</span></button>)}</div> : <Banner tone="warning">This product has no images. Creative directions can still be generated, but product details cannot be preserved from a reference.</Banner>}
       <div className="wizard-actions"><Button onClick={() => setStep(1)}>Back</Button><Button variant="primary" loading={busy} onClick={createPrompts}>Build creative directions ✦</Button></div>
     </section>}
     {step === 3 && <section className="wizard-card wide">
-      <div className="panel-title"><div><span className="eyebrow">STEP 3 OF 5</span><h2>Choose creative directions</h2><p className="lead">Edit the language until it feels like your brand.</p></div><div className="credit-cost">{selectedPromptCount} images · {selectedPromptCount} credits</div></div>
-      <div className="prompt-list">{prompts.map((item, index) => <div className={item.is_selected ? 'prompt selected' : 'prompt'} key={item.id ?? index}><Checkbox label="" checked={item.is_selected} onChange={value => setPrompts(current => current.map((p, i) => i === index ? {...p, is_selected: value} : p))} /><span className="prompt-number">{String(index + 1).padStart(2, '0')}</span><TextField label={`Prompt ${index + 1}`} labelHidden multiline={2} value={item.prompt} onChange={value => setPrompts(current => current.map((p, i) => i === index ? {...p, prompt: value} : p))} autoComplete="off" /></div>)}</div>
-      <button className="add-prompt" onClick={() => setPrompts(current => [...current, {prompt: '', is_selected: true}])}>＋ Add your own direction</button>
+      <div className="prompt-heading">
+        <div><span className="eyebrow">STEP 3 OF 5</span><h2>Choose your ideas</h2><p className="lead">Select the scenes you want to create. Open any card to edit the full prompt.</p></div>
+        <div className="prompt-heading-actions">
+          <Button onClick={() => openPromptEditor()}>＋ Add custom prompt</Button>
+          <Checkbox label="Select all" checked={allPromptsSelected} onChange={toggleAllPrompts} />
+        </div>
+      </div>
+      <div className="prompt-summary"><span>{selectedPromptCount} of {prompts.length} selected</span><div className="credit-cost">{selectedPromptCount} images · {selectedPromptCount} credits</div></div>
+      <div className="prompt-list">{prompts.map((item, index) => {
+        const preview = promptText(item.prompt);
+        return <article className={item.is_selected ? 'prompt selected' : 'prompt'} key={item.id ?? `custom-${index}`}>
+          <button className="prompt-card-copy" onClick={() => togglePrompt(index)} aria-pressed={item.is_selected}>
+            <span className="prompt-number">IDEA {String(index + 1).padStart(2, '0')}</span>
+            <h3>{promptTitle(item.prompt, index)}</h3>
+            <p>{preview}</p>
+          </button>
+          <div className="prompt-card-actions">
+            <button className="prompt-edit" onClick={() => openPromptEditor(index)} aria-label={`Edit idea ${index + 1}`}>✎ <span>Edit</span></button>
+            <button className="prompt-select" onClick={() => togglePrompt(index)} aria-label={`${item.is_selected ? 'Deselect' : 'Select'} idea ${index + 1}`}>
+              <span>{item.is_selected ? '✓' : ''}</span>{item.is_selected ? 'Selected' : 'Select'}
+            </button>
+          </div>
+        </article>;
+      })}</div>
       <div className="wizard-actions"><Button onClick={() => setStep(2)}>Back</Button><Button variant="primary" disabled={!selectedPromptCount} onClick={createImages}>Generate {selectedPromptCount} images ✦</Button></div>
     </section>}
     {step === 4 && <section className="generating">
-      <div className="orb"><span>✦</span></div><span className="eyebrow">CREATING YOUR SET</span><h2>Setting the scene…</h2><p>PixelMint is preserving the product while crafting each world around it.</p><div className="generation-progress"><ProgressBar progress={70} tone="success" /><small>{selectedPromptCount} compositions in progress</small></div>
+      <div className="orb"><span>✦</span></div><span className="eyebrow">CREATING YOUR SET</span><h2>Setting the scene…</h2><p>{generationMessage}</p><div className="generation-progress"><ProgressBar progress={generationProgress} tone="success" /><small>{selectedPromptCount} compositions · please keep this page open</small></div>
     </section>}
     {step === 5 && <section className="wizard-card wide">
       <div className="panel-title"><div><span className="eyebrow">STEP 5 OF 5</span><h2>Your new image set</h2><p className="lead">Select the strongest images to add to Shopify.</p></div><Badge tone="success">{selected.length} selected</Badge></div>
       <div className="result-grid">{results.map(image => <button onClick={() => setSelected(current => current.includes(image.id) ? current.filter(x => x !== image.id) : [...current, image.id])} className={selected.includes(image.id) ? 'result selected' : 'result'} key={image.id}><img src={image.url} /><span>{selected.includes(image.id) ? '✓' : ''}</span><div><b>Download</b><b>↻</b></div></button>)}</div>
-      <div className="wizard-actions"><Button onClick={() => setStep(3)}>Refine directions</Button><Button variant="primary" disabled={!selected.length} onClick={finish}>Add {selected.length} to product →</Button></div>
+      <div className="wizard-actions"><Button onClick={() => setStep(3)}>Refine directions</Button><Button variant="primary" loading={busy} disabled={!selected.length} onClick={finish}>Add {selected.length} to product →</Button></div>
     </section>}
     {toast && <Toast content={toast} onDismiss={() => setToast('')} />}
+    {promptEditor && <PromptEditor
+      editor={promptEditor}
+      onChange={value => setPromptEditor(current => ({...current, value, error: ''}))}
+      onSave={savePrompt}
+      onClose={() => setPromptEditor(null)}
+    />}
   </div>;
 }
 
@@ -230,13 +533,64 @@ function History({jobs}) {
 }
 
 function Billing({account}) {
-  const plans = [
-    {name: 'Free', price: 0, credits: 10}, {name: 'Starter', price: 9, credits: 100},
-    {name: 'Pro', price: 29, credits: 400, featured: true}, {name: 'Growth', price: 79, credits: '1,500'},
+  const fallbackPlans = [
+    {id: 'free', name: 'Free', price: 0, credits: 10}, {id: 'starter', name: 'Starter', price: 9, credits: 60},
+    {id: 'pro', name: 'Pro', price: 29, credits: 200}, {id: 'growth', name: 'Growth', price: 79, credits: 550},
   ];
+  const fallbackPacks = [
+    {id: 'boost-50', name: 'Quick boost', price: 9, credits: 50},
+    {id: 'boost-150', name: 'Campaign pack', price: 25, credits: 150},
+    {id: 'boost-500', name: 'Catalog pack', price: 75, credits: 500},
+  ];
+  const [plans, setPlans] = useState(fallbackPlans);
+  const [packs, setPacks] = useState(fallbackPacks);
+  const [busyPlan, setBusyPlan] = useState('');
+  const [busyPack, setBusyPack] = useState('');
+  const [toast, setToast] = useState('');
+  useEffect(() => {
+    if (!demoMode) api.plans().then(result => {
+      setPlans(result.plans);
+      setPacks(result.credit_packs);
+    }).catch(error => setToast(error.message));
+  }, []);
+  async function choosePlan(plan) {
+    setBusyPlan(plan.id);
+    try {
+      const result = await api.subscribe(plan.id);
+      window.open(result.confirmation_url, '_top');
+    } catch (error) { setToast(error.message); setBusyPlan(''); }
+  }
+  async function buyCredits(pack) {
+    setBusyPack(pack.id);
+    try {
+      const result = await api.purchaseCredits(pack.id);
+      window.open(result.confirmation_url, '_top');
+    } catch (error) { setToast(error.message); setBusyPack(''); }
+  }
   return <div className="page"><PageHeader eyebrow="PLAN & CREDITS" title="Room to keep creating" description={`You have ${account.credits_balance} credits left in this billing cycle.`} />
     <Banner title="Credits are only used for completed images" tone="info">Failed generations are automatically refunded to your balance.</Banner>
-    <div className="plan-grid">{plans.map(plan => <article className={plan.featured ? 'plan featured' : 'plan'} key={plan.name}>{plan.featured && <span className="popular">CURRENT PLAN</span>}<span className="eyebrow">{plan.name}</span><div className="price"><strong>${plan.price}</strong><small>/ month</small></div><p><b>{plan.credits}</b> image credits each month</p><ul><li>All creative directions</li><li>High-resolution exports</li><li>Shopify product publishing</li></ul><Button variant={plan.featured ? 'primary' : 'secondary'} fullWidth disabled={plan.featured}>{plan.featured ? 'Your current plan' : 'Choose plan'}</Button></article>)}</div>
+    <div className="credit-balances">
+      <span><b>{account.plan_credits_balance ?? account.credits_balance}</b> plan credits</span>
+      <span><b>{account.purchased_credits_balance ?? 0}</b> purchased credits that roll over</span>
+    </div>
+    <div className="plan-grid">{plans.map(plan => {
+      const current = account.plan?.toLowerCase() === (plan.id || plan.name).toLowerCase();
+      return <article className={current ? 'plan featured' : 'plan'} key={plan.id || plan.name}>{current && <span className="popular">CURRENT PLAN</span>}<span className="eyebrow">{plan.name}</span><div className="price"><strong>${plan.price}</strong><small>/ month</small></div><p><b>{plan.credits}</b> image credits each month</p><ul><li>All creative directions</li><li>High-resolution exports</li><li>Shopify product publishing</li></ul><Button variant={current ? 'primary' : 'secondary'} fullWidth loading={busyPlan === plan.id} disabled={current || !plan.price || demoMode} onClick={() => choosePlan(plan)}>{current ? 'Your current plan' : plan.price ? 'Choose plan' : 'Free plan'}</Button></article>;
+    })}</div>
+    <section className="credit-packs">
+      <div>
+        <span className="eyebrow">ONE-TIME TOP-UP</span>
+        <h2>Need a few more images?</h2>
+        <p>Purchased credits are added after Shopify confirms payment and do not reset with your monthly plan.</p>
+      </div>
+      <div className="credit-pack-grid">{packs.map(pack =>
+        <article className="credit-pack" key={pack.id}>
+          <div><span className="eyebrow">{pack.name}</span><strong>{Number(pack.credits).toLocaleString()} credits</strong></div>
+          <Button loading={busyPack === pack.id} disabled={demoMode} onClick={() => buyCredits(pack)}>Buy for ${pack.price}</Button>
+        </article>
+      )}</div>
+    </section>
+    {toast && <Toast content={toast} onDismiss={() => setToast('')} />}
   </div>;
 }
 

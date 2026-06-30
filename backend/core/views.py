@@ -1,46 +1,122 @@
+import json
+import re
+from datetime import timedelta
 from urllib.parse import urlencode
 
 from django.conf import settings
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import GeneratedImage, GeneratedPrompt, GenerationJob, ProductSnapshot, Shop
+from .models import (
+    CreditPack,
+    CreditPurchase,
+    GeneratedImage,
+    GeneratedPrompt,
+    GenerationJob,
+    Shop,
+    SubscriptionPlan,
+)
 from .serializers import (
+    CreditPackSerializer,
     CreateJobSerializer,
     GenerateImagesSerializer,
     ImageSelectionSerializer,
     JobSerializer,
-    ProductSerializer,
     ShopSerializer,
+    SubscriptionPlanSerializer,
 )
 from .services import (
     ShopifyClient,
+    ShopifyReauthorizationRequired,
     build_oauth_url,
     exchange_oauth_code,
     generate_prompt_ideas,
     reserve_credits,
+    update_credit_purchase,
     verify_shopify_hmac,
     verify_webhook_hmac,
 )
 from .tasks import generate_image_task
 
 
-PLANS = [
-    {"id": "free", "name": "Free", "price": 0, "credits": 10, "description": "Try PixelMint on a few products."},
-    {"id": "starter", "name": "Starter", "price": 9, "credits": 100, "description": "For new and growing storefronts."},
-    {"id": "pro", "name": "Pro", "price": 29, "credits": 400, "description": "For active brands publishing weekly.", "featured": True},
-    {"id": "growth", "name": "Growth", "price": 79, "credits": 1500, "description": "For teams and larger catalogs."},
-]
+def default_plan():
+    return (
+        SubscriptionPlan.objects.filter(slug="free").first()
+        or SubscriptionPlan.objects.filter(is_active=True).order_by("price", "sort_order").first()
+    )
+
+
+def plan_for_shopify_subscription(subscription):
+    name = subscription.get("name", "")
+    stable_prefix = "PixelMint Plan "
+    if name.startswith(stable_prefix):
+        return SubscriptionPlan.objects.filter(slug=name.removeprefix(stable_prefix)).first()
+    legacy_name = name.removeprefix("PixelMint ").strip()
+    return SubscriptionPlan.objects.filter(slug__iexact=legacy_name).first() or (
+        SubscriptionPlan.objects.filter(name__iexact=legacy_name).first()
+    )
+
+
+def sync_subscription_credits(shop, subscriptions):
+    active = next(
+        (item for item in subscriptions if item.get("status", "").upper() == "ACTIVE"),
+        None,
+    )
+    plan = plan_for_shopify_subscription(active) if active else default_plan()
+    if not plan:
+        return
+
+    now = timezone.now()
+    subscription_id = active.get("id", "") if active else ""
+    period_end = parse_datetime(active.get("currentPeriodEnd", "")) if active else None
+    if period_end and timezone.is_naive(period_end):
+        period_end = timezone.make_aware(period_end)
+
+    plan_changed = shop.plan_id != plan.id or shop.shopify_subscription_id != subscription_id
+    reset_due = (
+        plan_changed
+        or shop.next_plan_credit_reset_at is None
+        or now >= shop.next_plan_credit_reset_at
+        or (period_end and shop.next_plan_credit_reset_at != period_end)
+    )
+    shop.plan = plan
+    shop.shopify_subscription_id = subscription_id
+    update_fields = ["plan", "shopify_subscription_id"]
+    if reset_due:
+        shop.plan_credits_balance = plan.monthly_credits
+        shop.next_plan_credit_reset_at = period_end or now + timedelta(days=30)
+        update_fields.extend(["plan_credits_balance", "next_plan_credit_reset_at"])
+    shop.save(update_fields=update_fields)
 
 
 class MeView(APIView):
     def get(self, request):
         recent_jobs = GenerationJob.objects.filter(shop=request.user)[:5]
+        shop_name = request.user.shop_domain.removesuffix(".myshopify.com").replace("-", " ").title()
+        if request.user.access_token:
+            try:
+                context = ShopifyClient(request.user).fetch_shop_context()
+                shop_data = context["shop"]
+                shop_name = shop_data["name"]
+                request.user.shop_domain = shop_data["myshopifyDomain"]
+                sync_subscription_credits(
+                    request.user,
+                    context["currentAppInstallation"]["activeSubscriptions"],
+                )
+            except Exception:
+                pass
+        elif (
+            request.user.next_plan_credit_reset_at is None
+            or timezone.now() >= request.user.next_plan_credit_reset_at
+        ):
+            sync_subscription_credits(request.user, [])
+
         payload = ShopSerializer(request.user).data
         payload["recent_jobs"] = JobSerializer(recent_jobs, many=True, context={"request": request}).data
         payload["images_this_month"] = GeneratedImage.objects.filter(
@@ -49,48 +125,70 @@ class MeView(APIView):
             created_at__year=timezone.now().year,
             created_at__month=timezone.now().month,
         ).count()
+        payload["products_enhanced"] = GenerationJob.objects.filter(
+            shop=request.user,
+            images__added_to_shopify_at__isnull=False,
+        ).values("shopify_product_id").distinct().count()
+        payload["shop_name"] = shop_name
+        payload["credit_limit"] = request.user.plan.monthly_credits if request.user.plan else 0
         return Response(payload)
 
 
 class ProductListView(APIView):
     def get(self, request):
-        products = ProductSnapshot.objects.filter(shop=request.user)
-        search = request.query_params.get("search")
-        if search:
-            products = products.filter(title__icontains=search)
-        return Response(ProductSerializer(products, many=True).data)
-
-    def post(self, request):
         if not request.user.access_token:
-            return Response({"detail": "Connect a Shopify store before syncing."}, status=400)
-        ShopifyClient(request.user).sync_products()
-        products = ProductSnapshot.objects.filter(shop=request.user)
-        return Response(ProductSerializer(products, many=True).data)
+            raise ShopifyReauthorizationRequired()
+        try:
+            products = ShopifyClient(request.user).fetch_products(
+                request.query_params.get("search", "")
+            )
+        except ShopifyReauthorizationRequired:
+            raise
+        except Exception as exc:
+            return Response({"detail": f"Could not load products from Shopify: {exc}"}, status=502)
+        return Response(products)
 
 
 class ProductDetailView(APIView):
-    def get(self, request, pk):
-        product = get_object_or_404(ProductSnapshot, pk=pk, shop=request.user)
-        return Response(ProductSerializer(product).data)
+    def get(self, request, product_id):
+        try:
+            product = ShopifyClient(request.user).fetch_product(product_id)
+        except ShopifyReauthorizationRequired:
+            raise
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=404)
+        except Exception as exc:
+            return Response({"detail": f"Could not load product from Shopify: {exc}"}, status=502)
+        return Response(product)
 
 
 class JobListCreateView(APIView):
     def get(self, request):
-        jobs = GenerationJob.objects.filter(shop=request.user).select_related("product")
+        jobs = GenerationJob.objects.filter(shop=request.user)
         return Response(JobSerializer(jobs, many=True, context={"request": request}).data)
 
     def post(self, request):
         serializer = CreateJobSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        product = get_object_or_404(
-            ProductSnapshot,
-            pk=serializer.validated_data["product_id"],
-            shop=request.user,
-        )
+        try:
+            product = ShopifyClient(request.user).fetch_product(
+                serializer.validated_data["product_id"]
+            )
+        except ShopifyReauthorizationRequired:
+            raise
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=404)
+        except Exception as exc:
+            return Response({"detail": f"Could not load product from Shopify: {exc}"}, status=502)
+        allowed_images = {image.get("url") for image in product["images"]}
+        source_images = serializer.validated_data["source_images"]
+        if any(url not in allowed_images for url in source_images):
+            return Response({"detail": "Reference images must belong to the selected product."}, status=400)
         job = GenerationJob.objects.create(
             shop=request.user,
-            product=product,
-            source_images=serializer.validated_data["source_images"],
+            shopify_product_id=product["shopify_product_id"],
+            product_data=product,
+            source_images=source_images,
         )
         return Response(JobSerializer(job, context={"request": request}).data, status=201)
 
@@ -98,7 +196,7 @@ class JobListCreateView(APIView):
 class JobDetailView(APIView):
     def get(self, request, job_id):
         job = get_object_or_404(
-            GenerationJob.objects.select_related("product").prefetch_related("prompts", "images"),
+            GenerationJob.objects.prefetch_related("prompts", "images"),
             pk=job_id,
             shop=request.user,
         )
@@ -108,7 +206,7 @@ class JobDetailView(APIView):
 class GeneratePromptsView(APIView):
     def post(self, request, job_id):
         job = get_object_or_404(GenerationJob, pk=job_id, shop=request.user)
-        prompts = generate_prompt_ideas(job.product)
+        prompts = generate_prompt_ideas(job.product_data)
         job.prompts.all().delete()
         GeneratedPrompt.objects.bulk_create([
             GeneratedPrompt(job=job, prompt=prompt, sort_order=index)
@@ -128,7 +226,10 @@ class GenerateImagesView(APIView):
         if not selected:
             return Response({"detail": "Select at least one prompt."}, status=400)
 
-        reserve_credits(job, len(selected))
+        try:
+            reserve_credits(job, len(selected))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
         images = []
         for index, item in enumerate(selected):
             prompt = None
@@ -172,7 +273,10 @@ class RegenerateImageView(APIView):
     def post(self, request, job_id, image_id):
         job = get_object_or_404(GenerationJob, pk=job_id, shop=request.user)
         original = get_object_or_404(job.images, pk=image_id)
-        reserve_credits(job, 1)
+        try:
+            reserve_credits(job, 1)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
         replacement = GeneratedImage.objects.create(job=job, prompt=original.prompt)
         generate_image_task.delay(replacement.pk)
         return Response(JobSerializer(job, context={"request": request}).data, status=202)
@@ -189,10 +293,14 @@ def oauth_launch(request):
         return Response({"detail": "Invalid Shopify signature."}, status=400)
 
     if Shop.objects.filter(shop_domain=shop, is_active=True).exclude(access_token="").exists():
-        return HttpResponseRedirect(f"{settings.FRONTEND_URL}?{urlencode({'shop': shop})}")
+        frontend_params = {"shop": shop, "embedded": "1"}
+        if request.query_params.get("host"):
+            frontend_params["host"] = request.query_params["host"]
+        return HttpResponseRedirect(f"{settings.FRONTEND_URL}?{urlencode(frontend_params)}")
 
     url, state = build_oauth_url(shop)
     request.session["shopify_oauth_state"] = state
+    request.session["shopify_oauth_host"] = request.query_params.get("host", "")
     return HttpResponseRedirect(url)
 
 
@@ -204,6 +312,7 @@ def oauth_start(request):
         return Response({"detail": "Enter a valid myshopify.com domain."}, status=400)
     url, state = build_oauth_url(shop)
     request.session["shopify_oauth_state"] = state
+    request.session["shopify_oauth_host"] = request.query_params.get("host", "")
     return HttpResponseRedirect(url)
 
 
@@ -216,7 +325,7 @@ def oauth_callback(request):
         return Response({"detail": "Invalid Shopify signature."}, status=400)
     shop_domain = request.query_params["shop"]
     token = exchange_oauth_code(shop_domain, request.query_params["code"])
-    Shop.objects.update_or_create(
+    shop, _ = Shop.objects.update_or_create(
         shop_domain=shop_domain,
         defaults={
             "access_token": token["access_token"],
@@ -224,11 +333,42 @@ def oauth_callback(request):
             "is_active": True,
         },
     )
-    frontend_params = {"shop": shop_domain}
-    host = request.query_params.get("host")
+    if not shop.plan_id:
+        shop.plan = default_plan()
+        if shop.plan:
+            shop.plan_credits_balance = shop.plan.monthly_credits
+            shop.next_plan_credit_reset_at = timezone.now() + timedelta(days=30)
+            shop.save(
+                update_fields=["plan", "plan_credits_balance", "next_plan_credit_reset_at"]
+            )
+    frontend_params = {"shop": shop_domain, "embedded": "1"}
+    host = request.session.pop("shopify_oauth_host", "")
     if host:
         frontend_params["host"] = host
     return HttpResponseRedirect(f"{settings.FRONTEND_URL}?{urlencode(frontend_params)}")
+
+
+@api_view(["GET"])
+@permission_classes([permissions.AllowAny])
+def frontend_spa_redirect(request, path):
+    if path == "generate":
+        resource_id = (
+            request.query_params.get("id")
+            or request.query_params.get("product_id")
+            or request.query_params.get("ids[]")
+        )
+        if resource_id:
+            product_id = resource_id.rstrip("/").rsplit("/", 1)[-1]
+            if product_id.isdigit():
+                path = f"generate/{product_id}"
+
+    params = {
+        key: request.query_params[key]
+        for key in ("shop", "host", "embedded", "id_token")
+        if request.query_params.get(key)
+    }
+    suffix = f"?{urlencode(params)}" if params else ""
+    return HttpResponseRedirect(f"{settings.FRONTEND_URL}/{path}{suffix}")
 
 
 @api_view(["POST"])
@@ -246,32 +386,189 @@ def app_uninstalled(request):
 
 @api_view(["GET"])
 def billing_plans(request):
-    return Response(PLANS)
+    plans = SubscriptionPlan.objects.filter(is_active=True)
+    packs = CreditPack.objects.filter(is_active=True)
+    return Response({
+        "plans": SubscriptionPlanSerializer(plans, many=True).data,
+        "credit_packs": CreditPackSerializer(packs, many=True).data,
+    })
 
 
 @api_view(["POST"])
 def billing_subscribe(request):
-    plan = next((plan for plan in PLANS if plan["id"] == request.data.get("plan_id")), None)
-    if not plan or plan["price"] == 0:
+    plan = SubscriptionPlan.objects.filter(
+        slug=request.data.get("plan_id"), is_active=True
+    ).first()
+    if not plan or plan.price == 0:
         return Response({"detail": "Choose a paid plan."}, status=400)
     if not request.user.access_token:
         return Response({"detail": "Connect Shopify before subscribing."}, status=400)
     mutation = """
-    mutation Subscribe($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!) {
-      appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems) {
+    mutation Subscribe(
+      $name: String!,
+      $returnUrl: URL!,
+      $lineItems: [AppSubscriptionLineItemInput!]!,
+      $test: Boolean!,
+      $replacementBehavior: AppSubscriptionReplacementBehavior!
+    ) {
+      appSubscriptionCreate(
+        name: $name,
+        returnUrl: $returnUrl,
+        lineItems: $lineItems,
+        test: $test,
+        replacementBehavior: $replacementBehavior
+      ) {
+        appSubscription { id status test }
         confirmationUrl
         userErrors { field message }
       }
     }
     """
-    result = ShopifyClient(request.user).graphql(mutation, {
-        "name": f"PixelMint {plan['name']}",
-        "returnUrl": f"{settings.FRONTEND_URL}/billing",
-        "lineItems": [{"plan": {"appRecurringPricingDetails": {
-            "price": {"amount": plan["price"], "currencyCode": "USD"},
-            "interval": "EVERY_30_DAYS",
-        }}}],
-    })["appSubscriptionCreate"]
+    return_params = {"shop": request.user.shop_domain, "embedded": "1"}
+    if request.query_params.get("host"):
+        return_params["host"] = request.query_params["host"]
+    try:
+        result = ShopifyClient(request.user).graphql(mutation, {
+            "name": f"PixelMint Plan {plan.slug}",
+            "returnUrl": f"{settings.FRONTEND_URL}/billing?{urlencode(return_params)}",
+            "lineItems": [{"plan": {"appRecurringPricingDetails": {
+                "price": {"amount": str(plan.price), "currencyCode": "USD"},
+                "interval": "EVERY_30_DAYS",
+            }}}],
+            "test": settings.SHOPIFY_BILLING_TEST_MODE,
+            "replacementBehavior": "APPLY_IMMEDIATELY",
+        })["appSubscriptionCreate"]
+    except ShopifyReauthorizationRequired:
+        raise
+    except Exception as exc:
+        return Response(
+            {"detail": f"Shopify billing request failed: {exc}"},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
     if result["userErrors"]:
-        return Response({"errors": result["userErrors"]}, status=400)
+        message = "; ".join(error["message"] for error in result["userErrors"])
+        return Response(
+            {"detail": message, "errors": result["userErrors"]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not result.get("confirmationUrl"):
+        return Response(
+            {"detail": "Shopify did not return a billing confirmation URL."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
     return Response({"confirmation_url": result["confirmationUrl"]})
+
+
+@api_view(["POST"])
+def billing_purchase_credits(request):
+    pack = CreditPack.objects.filter(
+        slug=request.data.get("pack_id"), is_active=True
+    ).first()
+    if not pack:
+        return Response({"detail": "Choose a valid credit pack."}, status=400)
+    if not request.user.access_token:
+        return Response({"detail": "Connect Shopify before purchasing credits."}, status=400)
+
+    purchase = CreditPurchase.objects.create(
+        shop=request.user,
+        pack=pack,
+        pack_name=pack.name,
+        credits=pack.credits,
+        amount=pack.price,
+        shopify_name="pending",
+    )
+    purchase.shopify_name = f"PixelMint {pack.credits} credits [{purchase.reference}]"
+    purchase.save(update_fields=["shopify_name"])
+
+    return_params = {
+        "shop": request.user.shop_domain,
+        "embedded": "1",
+        "credit_purchase": str(purchase.reference),
+    }
+    if request.query_params.get("host"):
+        return_params["host"] = request.query_params["host"]
+    mutation = """
+    mutation PurchaseCredits(
+      $name: String!,
+      $price: MoneyInput!,
+      $returnUrl: URL!,
+      $test: Boolean
+    ) {
+      appPurchaseOneTimeCreate(
+        name: $name,
+        price: $price,
+        returnUrl: $returnUrl,
+        test: $test
+      ) {
+        appPurchaseOneTime { id status }
+        confirmationUrl
+        userErrors { field message }
+      }
+    }
+    """
+    try:
+        result = ShopifyClient(request.user).graphql(mutation, {
+            "name": purchase.shopify_name,
+            "price": {"amount": str(pack.price), "currencyCode": "USD"},
+            "returnUrl": f"{settings.FRONTEND_URL}/billing?{urlencode(return_params)}",
+            "test": settings.SHOPIFY_BILLING_TEST_MODE,
+        })["appPurchaseOneTimeCreate"]
+    except Exception as exc:
+        purchase.status = CreditPurchase.Status.ERROR
+        purchase.error_message = str(exc)
+        purchase.save(update_fields=["status", "error_message", "updated_at"])
+        return Response({"detail": "Shopify could not create the credit purchase."}, status=502)
+    if result["userErrors"]:
+        purchase.status = CreditPurchase.Status.ERROR
+        purchase.error_message = json.dumps(result["userErrors"])
+        purchase.save(update_fields=["status", "error_message", "updated_at"])
+        message = "; ".join(error["message"] for error in result["userErrors"])
+        return Response(
+            {"detail": message, "errors": result["userErrors"]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    purchase.shopify_purchase_id = result["appPurchaseOneTime"]["id"]
+    purchase.status = result["appPurchaseOneTime"]["status"]
+    purchase.save(update_fields=["shopify_purchase_id", "status", "updated_at"])
+    return Response({"confirmation_url": result["confirmationUrl"]})
+
+
+@api_view(["POST"])
+@permission_classes([permissions.AllowAny])
+def app_purchase_one_time_updated(request):
+    if settings.SHOPIFY_API_SECRET and not verify_webhook_hmac(
+        request.body, request.headers.get("X-Shopify-Hmac-Sha256", "")
+    ):
+        return Response({"detail": "Invalid webhook signature."}, status=401)
+    try:
+        data = json.loads(request.body)
+        payload = data["app_purchase_one_time"]
+        purchase_id = payload["admin_graphql_api_id"]
+        status_value = payload["status"].upper()
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return Response({"detail": "Invalid purchase webhook payload."}, status=400)
+
+    domain = request.headers.get("X-Shopify-Shop-Domain", "")
+    purchase = CreditPurchase.objects.filter(
+        shop__shop_domain=domain,
+        shopify_purchase_id=purchase_id,
+    ).first()
+    if not purchase:
+        match = re.search(
+            r"\[([0-9a-fA-F-]{36})\]$",
+            payload.get("name", ""),
+        )
+        if match:
+            purchase = CreditPurchase.objects.filter(
+                shop__shop_domain=domain,
+                reference=match.group(1),
+            ).first()
+            if purchase and not purchase.shopify_purchase_id:
+                purchase.shopify_purchase_id = purchase_id
+                purchase.save(update_fields=["shopify_purchase_id", "updated_at"])
+    if not purchase:
+        return Response({"detail": "Purchase is not registered yet."}, status=404)
+
+    update_credit_purchase(purchase, status_value)
+    return Response(status=status.HTTP_204_NO_CONTENT)

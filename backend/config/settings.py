@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import dj_database_url
 from dotenv import load_dotenv
@@ -65,8 +66,26 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "core.Shop"
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+BACKEND_URL = os.getenv("BACKEND_URL", "").rstrip("/")
+redirect_uri_for_backend = os.getenv("SHOPIFY_REDIRECT_URI", "")
+if not BACKEND_URL and redirect_uri_for_backend:
+    redirect_parts = urlsplit(redirect_uri_for_backend)
+    BACKEND_URL = f"{redirect_parts.scheme}://{redirect_parts.netloc}"
+for configured_url in (FRONTEND_URL, BACKEND_URL):
+    configured_host = urlsplit(configured_url).hostname
+    if configured_host and configured_host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(configured_host)
 CORS_ALLOWED_ORIGINS = [FRONTEND_URL]
-CSRF_TRUSTED_ORIGINS = [FRONTEND_URL]
+extra_csrf_origins = [
+    origin.strip()
+    for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(
+    origin for origin in [FRONTEND_URL, BACKEND_URL, *extra_csrf_origins] if origin
+))
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
 X_FRAME_OPTIONS = "ALLOWALL"
 
 REST_FRAMEWORK = {
@@ -81,6 +100,9 @@ SHOPIFY_API_SECRET = os.getenv("SHOPIFY_API_SECRET", "")
 SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2026-04")
 SHOPIFY_SCOPES = os.getenv("SHOPIFY_SCOPES", "read_products,write_products")
 SHOPIFY_REDIRECT_URI = os.getenv("SHOPIFY_REDIRECT_URI", "")
+SHOPIFY_BILLING_TEST_MODE = os.getenv(
+    "SHOPIFY_BILLING_TEST_MODE", str(DEBUG)
+).lower() == "true"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")

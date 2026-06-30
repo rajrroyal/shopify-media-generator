@@ -1,0 +1,14 @@
+{
+  "name": "pixelmint-shopify-app",
+  "private": true,
+  "scripts": {
+    "shopify": "XDG_CONFIG_HOME=.shopify-cli ./node_modules/node/bin/node ./node_modules/@shopify/cli/bin/run.js"
+  },
+  "workspaces": [
+    "extensions/*"
+  ],
+  "devDependencies": {
+    "@shopify/cli": "latest",
+    "node": "^22.12.0"
+  }
+}

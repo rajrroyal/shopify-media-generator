@@ -1,21 +1,40 @@
 from rest_framework import serializers
 
-from .models import GeneratedImage, GeneratedPrompt, GenerationJob, ProductSnapshot, Shop
+from .models import CreditPack, GeneratedImage, GeneratedPrompt, GenerationJob, Shop, SubscriptionPlan
 
 
 class ShopSerializer(serializers.ModelSerializer):
+    plan = serializers.SlugRelatedField(slug_field="slug", read_only=True)
+    credits_balance = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Shop
-        fields = ["shop_domain", "plan", "credits_balance", "installed_at"]
-
-
-class ProductSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ProductSnapshot
         fields = [
-            "id", "shopify_product_id", "title", "description", "vendor",
-            "product_type", "status", "tags", "images", "variants", "synced_at",
+            "shop_domain",
+            "plan",
+            "credits_balance",
+            "plan_credits_balance",
+            "purchased_credits_balance",
+            "next_plan_credit_reset_at",
+            "installed_at",
         ]
+
+
+class SubscriptionPlanSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(source="slug", read_only=True)
+    credits = serializers.IntegerField(source="monthly_credits", read_only=True)
+
+    class Meta:
+        model = SubscriptionPlan
+        fields = ["id", "slug", "name", "price", "credits", "description", "featured"]
+
+
+class CreditPackSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(source="slug", read_only=True)
+
+    class Meta:
+        model = CreditPack
+        fields = ["id", "slug", "name", "price", "credits", "description"]
 
 
 class PromptSerializer(serializers.ModelSerializer):
@@ -36,7 +55,7 @@ class ImageSerializer(serializers.ModelSerializer):
 
 
 class JobSerializer(serializers.ModelSerializer):
-    product = ProductSerializer(read_only=True)
+    product = serializers.JSONField(source="product_data", read_only=True)
     prompts = PromptSerializer(many=True, read_only=True)
     images = ImageSerializer(many=True, read_only=True)
 
@@ -49,7 +68,7 @@ class JobSerializer(serializers.ModelSerializer):
 
 
 class CreateJobSerializer(serializers.Serializer):
-    product_id = serializers.IntegerField()
+    product_id = serializers.CharField(max_length=100)
     source_images = serializers.ListField(child=serializers.URLField(), required=False, default=list)
 
 
@@ -65,4 +84,3 @@ class GenerateImagesSerializer(serializers.Serializer):
 
 class ImageSelectionSerializer(serializers.Serializer):
     image_ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=False)
-
