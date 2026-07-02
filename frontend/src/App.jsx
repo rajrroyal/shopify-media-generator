@@ -100,6 +100,40 @@ function PromptEditor({editor, onChange, onSave, onClose}) {
   </div>;
 }
 
+function ImageLightbox({images, initialIndex, onClose}) {
+  const [activeIndex, setActiveIndex] = useState(initialIndex ?? 0);
+
+  useEffect(() => {
+    setActiveIndex(initialIndex ?? 0);
+  }, [initialIndex]);
+
+  useEffect(() => {
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
+  if (!images?.length || initialIndex === null || initialIndex === undefined) return null;
+  const activeImage = images[activeIndex] || images[0];
+  if (!activeImage?.url) return null;
+
+  return <div className="prompt-modal-backdrop image-lightbox-backdrop" onMouseDown={event => {
+    if (event.target === event.currentTarget) onClose();
+  }}>
+    <section className="image-lightbox" role="dialog" aria-modal="true" aria-label="Image preview">
+      <button className="prompt-modal-close image-lightbox-close" onClick={onClose} aria-label="Close image preview">×</button>
+      <img src={activeImage.url} alt="Preview" />
+      {images.length > 1 && <div className="image-lightbox-controls">
+        <button type="button" onClick={() => setActiveIndex(current => (current - 1 + images.length) % images.length)} aria-label="Previous image">←</button>
+        <span>{activeIndex + 1} / {images.length}</span>
+        <button type="button" onClick={() => setActiveIndex(current => (current + 1) % images.length)} aria-label="Next image">→</button>
+      </div>}
+    </section>
+  </div>;
+}
+
 function App() {
   const [products, setProducts] = useState(demoMode ? demoProducts : []);
   const [jobs, setJobs] = useState(demoMode ? demoJobs : []);
@@ -153,23 +187,19 @@ function App() {
             <Link className="credit-pill" to={shopifyTo('/billing')}>
               <span>✦</span><strong>{account.credits_balance}</strong><small>credits</small>
             </Link>
-            <div className="store-chip">
-              <span className="store-avatar">{initial}</span>
-              <span><strong>{storeName}</strong><small>{account.shop_domain}</small></span>
-            </div>
           </div>
         </header>
         <main className="main">
-          {loading && <AppMessage tone="info" title="Opening your workspace" message="Loading your store details and generation history…" />}
-          {demoMode && <AppMessage tone="info" title="Preview mode" message="Shopify publishing is disabled while demo mode is active." />}
-          {apiError && <AppMessage tone="critical" title="We couldn’t load your store" message={apiError} onDismiss={() => setApiError('')} />}
+          {loading && <AppMessage tone="info" title="Preparing your workspace" message="Loading your store details and recent generations…" />}
+          {demoMode && <AppMessage tone="info" title="Demo mode" message="Shopify publishing is paused while demo mode is active." />}
+          {apiError && <AppMessage tone="critical" title="We couldn’t access your store" message={apiError} onDismiss={() => setApiError('')} />}
           <Routes>
             <Route path="/" element={<Dashboard account={account} jobs={jobs} loading={loading} />} />
             <Route path="/products" element={<Products products={products} setProducts={setProducts} />} />
             <Route path="/generate" element={<Generate products={products} setProducts={setProducts} setJobs={setJobs} account={account} setAccount={setAccount} demo={demoMode} />} />
             <Route path="/generate/:productId" element={<Generate products={products} setProducts={setProducts} setJobs={setJobs} account={account} setAccount={setAccount} demo={demoMode} />} />
             <Route path="/history" element={<History jobs={jobs} />} />
-            <Route path="/billing" element={<Billing account={account} />} />
+            <Route path="/billing" element={<Billing account={account} setAccount={setAccount} />} />
           </Routes>
         </main>
       </div>
@@ -301,7 +331,10 @@ function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
   const [jobId, setJobId] = useState(null);
   const [generationProgress, setGenerationProgress] = useState(0);
   const [generationMessage, setGenerationMessage] = useState('Preparing your product references…');
+  const [generationSlots, setGenerationSlots] = useState([]);
   const [promptEditor, setPromptEditor] = useState(null);
+  const [lightboxImages, setLightboxImages] = useState([]);
+  const [lightboxIndex, setLightboxIndex] = useState(null);
 
   const selectedPromptCount = prompts.filter(p => p.is_selected).length;
   const allPromptsSelected = prompts.length > 0 && selectedPromptCount === prompts.length;
@@ -408,22 +441,46 @@ function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
     if (!demo && !jobId) return setToast('Build creative directions before generating images.');
     setBusy(true); setStep(4); setGenerationProgress(8);
     setGenerationMessage('Preparing your product references…');
+    const selectedPrompts = prompts.filter(prompt => prompt.is_selected);
+    setGenerationSlots(selectedPrompts.map((prompt, index) => ({
+      key: prompt.id ?? `custom-${index}`,
+      status: 'waiting',
+      url: '',
+    })));
+    setResults([]);
+    setSelected([]);
     try {
       if (!demo && jobId) {
-        await api.generateImages(jobId, prompts);
-        const terminal = new Set(['completed', 'partial', 'failed']);
+        const made = [];
+        const knownImageIds = new Set();
+        const existingJob = await api.job(jobId);
+        existingJob.images.forEach(image => knownImageIds.add(image.id));
         let job;
-        for (let attempt = 0; attempt < 120; attempt += 1) {
-          await new Promise(resolve => setTimeout(resolve, 2500));
-          job = await api.job(jobId);
-          setGenerationProgress(Math.min(94, 16 + attempt * 2));
-          setGenerationMessage(job.status === 'processing'
-            ? 'Creating polished scenes from your selected directions…'
-            : 'Your generation is queued and will begin shortly…');
-          if (terminal.has(job.status)) break;
+        for (let index = 0; index < selectedPrompts.length; index += 1) {
+          setGenerationSlots(slots => slots.map((slot, slotIndex) =>
+            slotIndex === index ? {...slot, status: 'processing'} : slot
+          ));
+          setGenerationMessage(`Creating image ${index + 1} of ${selectedPrompts.length}…`);
+          job = await api.generateImages(jobId, [selectedPrompts[index]]);
+          const generated = job.images.find(image => !knownImageIds.has(image.id));
+          job.images.forEach(image => knownImageIds.add(image.id));
+          if (!generated || generated.status !== 'completed' || !generated.url) {
+            const message = generated?.error_message || 'Image generation failed.';
+            setGenerationSlots(slots => slots.map((slot, slotIndex) =>
+              slotIndex === index ? {...slot, status: 'failed', error: message} : slot
+            ));
+            setGenerationProgress(Math.round(((index + 1) / selectedPrompts.length) * 100));
+            continue;
+          }
+          made.push(generated);
+          setResults([...made]);
+          setGenerationSlots(slots => slots.map((slot, slotIndex) =>
+            slotIndex === index
+              ? {...slot, status: 'completed', url: generated.url}
+              : slot
+          ));
+          setGenerationProgress(Math.round(((index + 1) / selectedPrompts.length) * 100));
         }
-        if (!job || !terminal.has(job.status)) throw new Error('Generation is taking longer than expected. Check History in a moment.');
-        const made = job.images.filter(image => image.status === 'completed' && image.url);
         if (!made.length) throw new Error(job.error_message || job.images.find(image => image.error_message)?.error_message || 'Image generation failed.');
         setResults(made);
         setSelected(made.map(image => image.id));
@@ -460,16 +517,21 @@ function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
     finally { setBusy(false); }
   }
 
+  function openImagePreview(images, index = 0) {
+    setLightboxImages(images);
+    setLightboxIndex(index);
+  }
+
   if (productLoading) {
-    return <div className="page"><div className="catalog-loading"><span className="loading-orb">✦</span><div><strong>{productId ? 'Loading your selected Shopify product' : 'Loading products from Shopify'}</strong><small>Preparing the Create workspace…</small></div></div></div>;
+    return <div className="page"><div className="catalog-loading"><span className="loading-orb">✦</span><div><strong>{productId ? 'Loading your selected product' : 'Loading products from Shopify'}</strong><small>Preparing your image workspace…</small></div></div></div>;
   }
 
   if (!product) {
-    return <div className="page"><section className="load-error"><span>!</span><div><h2>We couldn’t load a product</h2><p>{productError || 'No products are currently available in this Shopify store.'}</p></div><div className="load-error-actions"><Button onClick={() => setLoadAttempt(value => value + 1)}>Try again</Button><Button variant="primary" onClick={() => navigate(shopifyTo('/products'))}>Browse Shopify products</Button></div></section></div>;
+    return <div className="page"><section className="load-error"><span>!</span><div><h2>We couldn’t find a product</h2><p>{productError || 'No products are currently available in this Shopify store.'}</p></div><div className="load-error-actions"><Button onClick={() => setLoadAttempt(value => value + 1)}>Try again</Button><Button variant="primary" onClick={() => navigate(shopifyTo('/products'))}>Browse Shopify products</Button></div></section></div>;
   }
 
   return <div className="page wizard-page">
-    <PageHeader eyebrow="AI IMAGE STUDIO" title={step === 1 ? 'Start with a product' : product.title} description="Build a cohesive set of product images in a few focused steps." />
+    <PageHeader eyebrow="PRODUCT IMAGING" title={step === 1 ? 'Start with a product' : product.title} description="Build a cohesive set of product images in a few focused steps." />
     <div className="stepper">{['Product', 'References', 'Directions', 'Generating', 'Review'].map((label, i) => <div className={step >= i + 1 ? 'step active' : 'step'} key={label}><span>{step > i + 1 ? '✓' : i + 1}</span><small>{label}</small></div>)}</div>
     {step === 1 && <section className="wizard-card">
       <span className="eyebrow">STEP 1 OF 5</span><h2>What are we photographing?</h2>
@@ -478,7 +540,7 @@ function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
     </section>}
     {step === 2 && <section className="wizard-card">
       <span className="eyebrow">STEP 2 OF 5</span><h2>Choose your references</h2><p className="lead">We’ll use these to keep shape, color, materials and branding faithful.</p>
-      {product.images?.length ? <div className="reference-grid">{product.images.map((image, i) => <button onClick={() => setReferences(current => current.includes(i) ? current.filter(x => x !== i) : [...current, i])} className={references.includes(i) ? 'reference selected' : 'reference'} key={image.url}><img src={image.url} alt="" /><span>{references.includes(i) ? '✓ Selected' : 'Select'}</span></button>)}</div> : <Banner tone="warning">This product has no images. Creative directions can still be generated, but product details cannot be preserved from a reference.</Banner>}
+      {product.images?.length ? <div className="reference-grid">{product.images.map((image, i) => <button onClick={() => setReferences(current => current.includes(i) ? current.filter(x => x !== i) : [...current, i])} className={references.includes(i) ? 'reference selected' : 'reference'} key={image.url}><img src={image.url} alt="" /><span>{references[0] === i ? '★ Primary reference' : references.includes(i) ? '✓ Selected' : 'Select'}</span></button>)}</div> : <Banner tone="warning">This product has no images. Creative directions can still be generated, but product details cannot be preserved from a reference.</Banner>}
       <div className="wizard-actions"><Button onClick={() => setStep(1)}>Back</Button><Button variant="primary" loading={busy} onClick={createPrompts}>Build creative directions ✦</Button></div>
     </section>}
     {step === 3 && <section className="wizard-card wide">
@@ -495,7 +557,7 @@ function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
         return <article className={item.is_selected ? 'prompt selected' : 'prompt'} key={item.id ?? `custom-${index}`}>
           <button className="prompt-card-copy" onClick={() => togglePrompt(index)} aria-pressed={item.is_selected}>
             <span className="prompt-number">IDEA {String(index + 1).padStart(2, '0')}</span>
-            <h3>{promptTitle(item.prompt, index)}</h3>
+            <h3>{item.title || promptTitle(item.prompt, index)}</h3>
             <p>{preview}</p>
           </button>
           <div className="prompt-card-actions">
@@ -508,15 +570,41 @@ function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
       })}</div>
       <div className="wizard-actions"><Button onClick={() => setStep(2)}>Back</Button><Button variant="primary" disabled={!selectedPromptCount} onClick={createImages}>Generate {selectedPromptCount} images ✦</Button></div>
     </section>}
-    {step === 4 && <section className="generating">
-      <div className="orb"><span>✦</span></div><span className="eyebrow">CREATING YOUR SET</span><h2>Setting the scene…</h2><p>{generationMessage}</p><div className="generation-progress"><ProgressBar progress={generationProgress} tone="success" /><small>{selectedPromptCount} compositions · please keep this page open</small></div>
+    {step === 4 && <section className="wizard-card wide">
+      <div className="panel-title"><div><span className="eyebrow">STEP 5 OF 5 · GENERATING</span><h2>Your new image set</h2><p className="lead">{generationMessage}</p></div><Badge>{generationSlots.filter(slot => slot.status === 'completed').length} of {generationSlots.length} ready</Badge></div>
+      <div className="result-grid">{generationSlots.map((slot, index) =>
+        <button className={`result generation-result ${slot.status}`} key={slot.key} disabled>
+          {slot.url
+            ? <img src={slot.url} alt={`Generated composition ${index + 1}`} />
+            : <div className="generation-placeholder"><span className="generation-spinner" /><small>{slot.status === 'failed' ? 'Generation failed' : slot.status === 'processing' ? 'Generating…' : 'Waiting…'}</small></div>}
+          <span>{slot.status === 'completed' ? '✓' : String(index + 1).padStart(2, '0')}</span>
+        </button>
+      )}</div>
+      <div className="generation-progress"><ProgressBar progress={generationProgress} tone="success" /><small>{selectedPromptCount} compositions · please keep this page open</small></div>
+      <div className="wizard-actions generation-disabled-actions"><Button disabled>Refine directions</Button><Button variant="primary" disabled>Add to product →</Button></div>
     </section>}
     {step === 5 && <section className="wizard-card wide">
       <div className="panel-title"><div><span className="eyebrow">STEP 5 OF 5</span><h2>Your new image set</h2><p className="lead">Select the strongest images to add to Shopify.</p></div><Badge tone="success">{selected.length} selected</Badge></div>
-      <div className="result-grid">{results.map(image => <button onClick={() => setSelected(current => current.includes(image.id) ? current.filter(x => x !== image.id) : [...current, image.id])} className={selected.includes(image.id) ? 'result selected' : 'result'} key={image.id}><img src={image.url} /><span>{selected.includes(image.id) ? '✓' : ''}</span><div><b>Download</b><b>↻</b></div></button>)}</div>
+      <div className="result-grid">{results.map((image, index) => <div className={selected.includes(image.id) ? 'result selected' : 'result'} key={image.id}>
+        <button type="button" className="result-media" onClick={() => openImagePreview(results.map(item => ({url: item.url})), index)}>
+          <img src={image.url} alt={`Generated review ${index + 1}`} />
+        </button>
+        <span>{selected.includes(image.id) ? '✓' : ''}</span>
+        <div className="result-actions">
+          <button type="button" className="result-action-button" onClick={event => {
+            event.stopPropagation();
+            setSelected(current => current.includes(image.id) ? current.filter(x => x !== image.id) : [...current, image.id]);
+          }}>Select</button>
+          <button type="button" className="result-action-button" onClick={event => {
+            event.stopPropagation();
+            openImagePreview(results.map(item => ({url: item.url})), index);
+          }}>Preview</button>
+        </div>
+      </div>)}</div>
       <div className="wizard-actions"><Button onClick={() => setStep(3)}>Refine directions</Button><Button variant="primary" loading={busy} disabled={!selected.length} onClick={finish}>Add {selected.length} to product →</Button></div>
     </section>}
     {toast && <Toast content={toast} onDismiss={() => setToast('')} />}
+    <ImageLightbox images={lightboxImages} initialIndex={lightboxIndex} onClose={() => {setLightboxIndex(null); setLightboxImages([]);}} />
     {promptEditor && <PromptEditor
       editor={promptEditor}
       onChange={value => setPromptEditor(current => ({...current, value, error: ''}))}
@@ -527,12 +615,36 @@ function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
 }
 
 function History({jobs}) {
+  const [openJob, setOpenJob] = useState(null);
+  const [lightboxImages, setLightboxImages] = useState([]);
+  const [lightboxIndex, setLightboxIndex] = useState(null);
+
+  function openImagePreview(images, index = 0) {
+    setLightboxImages(images);
+    setLightboxIndex(index);
+  }
+
   return <div className="page"><PageHeader eyebrow="YOUR ARCHIVE" title="Generation history" description="Every creative set, ready to revisit." action={<Button variant="primary" url={shopifyTo('/generate')}>New generation</Button>} />
-    {jobs.length ? <div className="history-grid">{jobs.map(job => <article className="history-card" key={job.id}><div className="history-images">{job.images?.slice(0, 3).map(image => <img src={image.url} key={image.id} />)}</div><div className="history-copy"><div><span className="eyebrow">{new Date(job.created_at).toLocaleDateString()}</span><h3>{job.product.title}</h3><small>{job.images?.length} images · {job.credits_used} credits</small></div><Button>Open set</Button></div></article>)}</div> : <EmptyState heading="No generations yet" action={{content: 'Create images', url: '/generate'}} />}
+    {jobs.length ? <div className="history-grid">{jobs.map(job => <article className="history-card" key={job.id}><div className="history-images">{job.images?.slice(0, 3).map(image => <img src={image.url} key={image.id} />)}</div><div className="history-copy"><div><span className="eyebrow">{new Date(job.created_at).toLocaleDateString()}</span><h3>{job.product.title}</h3><small>{job.images?.length} images · {job.credits_used} credits</small></div><Button onClick={() => setOpenJob(job)}>Open set</Button></div></article>)}</div> : <EmptyState heading="No generations yet" action={{content: 'Create images', url: '/generate'}} />}
+    {openJob && <div className="prompt-modal-backdrop" onMouseDown={event => {
+      if (event.target === event.currentTarget) setOpenJob(null);
+    }}>
+      <section className="prompt-modal history-set-modal" role="dialog" aria-modal="true" aria-labelledby="history-set-title">
+        <header><div><span className="eyebrow">{new Date(openJob.created_at).toLocaleDateString()}</span><h2 id="history-set-title">{openJob.product.title}</h2></div><button className="prompt-modal-close" onClick={() => setOpenJob(null)} aria-label="Close image set">×</button></header>
+        <p>{openJob.images?.length || 0} generated images · {openJob.credits_used} credits used</p>
+        <div className="history-set-grid">{openJob.images?.filter(image => image.url).map((image, index) =>
+          <button type="button" className="history-set-image" key={image.id} onClick={() => openImagePreview(openJob.images.filter(item => item.url).map(item => ({url: item.url})), index)}>
+            <img src={image.url} alt="" />
+            <span>{image.status}</span>
+          </button>
+        )}</div>
+      </section>
+    </div>}
+    <ImageLightbox images={lightboxImages} initialIndex={lightboxIndex} onClose={() => {setLightboxIndex(null); setLightboxImages([]);}} />
   </div>;
 }
 
-function Billing({account}) {
+function Billing({account, setAccount}) {
   const fallbackPlans = [
     {id: 'free', name: 'Free', price: 0, credits: 10}, {id: 'starter', name: 'Starter', price: 9, credits: 60},
     {id: 'pro', name: 'Pro', price: 29, credits: 200}, {id: 'growth', name: 'Growth', price: 79, credits: 550},
@@ -553,6 +665,28 @@ function Billing({account}) {
       setPacks(result.credit_packs);
     }).catch(error => setToast(error.message));
   }, []);
+  useEffect(() => {
+    if (demoMode) return;
+    const current = new URLSearchParams(location.search);
+    const reference = current.get('credit_purchase');
+    if (!reference) return;
+    api.confirmCreditPurchase(reference).then(result => {
+      setAccount(accountState => ({
+        ...accountState,
+        credits_balance: result.credits_balance,
+        purchased_credits_balance: result.purchased_credits_balance,
+      }));
+      if (result.credited) {
+        setToast('Your purchased credits have been added.');
+      } else {
+        setToast(`Shopify purchase status: ${result.status.toLowerCase()}.`);
+      }
+    }).catch(error => setToast(error.message)).finally(() => {
+      current.delete('credit_purchase');
+      const query = current.toString();
+      history.replaceState({}, '', `${location.pathname}${query ? `?${query}` : ''}`);
+    });
+  }, [setAccount]);
   async function choosePlan(plan) {
     setBusyPlan(plan.id);
     try {

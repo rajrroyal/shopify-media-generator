@@ -41,9 +41,20 @@ export default defineConfig(({mode}) => {
     target: 'http://127.0.0.1:8000',
     changeOrigin: true,
   };
+  const mediaProxy = {
+    target: env.VITE_MEDIA_PROXY_TARGET || 'http://127.0.0.1:8000',
+    changeOrigin: true,
+    configure: proxy => {
+      proxy.on('proxyRes', (proxyResponse, request) => {
+        if (request.url?.split('?', 1)[0].endsWith('.webp')) {
+          proxyResponse.headers['content-type'] = 'image/webp';
+        }
+      });
+    },
+  };
   const proxy = {
     '/api': backendProxy,
-    '/media': backendProxy,
+    '/media': mediaProxy,
   };
 
   return {

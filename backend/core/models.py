@@ -48,6 +48,19 @@ class CreditPack(models.Model):
         return f"{self.name} ({self.credits} credits)"
 
 
+class AppSetting(models.Model):
+    key = models.CharField(max_length=100, unique=True)
+    value = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @classmethod
+    def get_value(cls, key, default=""):
+        return cls.objects.filter(key=key).values_list("value", flat=True).first() or default
+
+    def __str__(self):
+        return self.key
+
+
 class ShopManager(BaseUserManager):
     def create_user(self, shop_domain, password=None, **extra_fields):
         shop = self.model(shop_domain=shop_domain.lower(), **extra_fields)
@@ -64,6 +77,9 @@ class ShopManager(BaseUserManager):
 class Shop(AbstractBaseUser, PermissionsMixin):
     shop_domain = models.CharField(max_length=255, unique=True)
     access_token = models.TextField(blank=True)
+    access_token_expires_at = models.DateTimeField(null=True, blank=True)
+    refresh_token = models.TextField(blank=True)
+    refresh_token_expires_at = models.DateTimeField(null=True, blank=True)
     scope = models.TextField(blank=True)
     plan = models.ForeignKey(
         SubscriptionPlan,
@@ -119,6 +135,7 @@ class GenerationJob(models.Model):
 
 class GeneratedPrompt(models.Model):
     job = models.ForeignKey(GenerationJob, on_delete=models.CASCADE, related_name="prompts")
+    title = models.CharField(max_length=80, blank=True)
     prompt = models.TextField()
     is_selected = models.BooleanField(default=True)
     sort_order = models.PositiveSmallIntegerField(default=0)

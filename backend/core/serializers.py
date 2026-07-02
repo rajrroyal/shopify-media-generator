@@ -40,7 +40,7 @@ class CreditPackSerializer(serializers.ModelSerializer):
 class PromptSerializer(serializers.ModelSerializer):
     class Meta:
         model = GeneratedPrompt
-        fields = ["id", "prompt", "is_selected", "sort_order"]
+        fields = ["id", "title", "prompt", "is_selected", "sort_order"]
 
 
 class ImageSerializer(serializers.ModelSerializer):

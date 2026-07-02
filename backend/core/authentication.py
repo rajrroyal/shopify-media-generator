@@ -1,9 +1,11 @@
+import httpx
 import jwt
 from django.conf import settings
 from rest_framework import authentication, exceptions
 from urllib.parse import urlparse
 
 from .models import Shop
+from .services.shopify import ensure_shopify_access_token
 
 
 def shop_from_destination(destination):
@@ -37,8 +39,14 @@ class ShopifySessionAuthentication(authentication.BaseAuthentication):
                 if issuer_domain != domain:
                     raise exceptions.AuthenticationFailed("Invalid Shopify session issuer")
                 shop = Shop.objects.get(shop_domain=domain, is_active=True)
+                ensure_shopify_access_token(shop, token)
                 return shop, payload
-            except (jwt.PyJWTError, Shop.DoesNotExist, KeyError) as exc:
+            except (
+                httpx.HTTPError,
+                jwt.PyJWTError,
+                Shop.DoesNotExist,
+                KeyError,
+            ) as exc:
                 raise exceptions.AuthenticationFailed("Invalid Shopify session token") from exc
 
         if settings.DEBUG:

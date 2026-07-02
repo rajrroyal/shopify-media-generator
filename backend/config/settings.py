@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 
 import dj_database_url
 from dotenv import load_dotenv
+from corsheaders.defaults import default_headers
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -76,6 +77,7 @@ for configured_url in (FRONTEND_URL, BACKEND_URL):
     if configured_host and configured_host not in ALLOWED_HOSTS:
         ALLOWED_HOSTS.append(configured_host)
 CORS_ALLOWED_ORIGINS = [FRONTEND_URL]
+CORS_ALLOW_HEADERS = (*default_headers, "x-shop-domain")
 extra_csrf_origins = [
     origin.strip()
     for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")

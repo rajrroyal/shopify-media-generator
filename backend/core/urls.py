@@ -16,6 +16,10 @@ urlpatterns = [
     path("billing/plans/", views.billing_plans),
     path("billing/subscribe/", views.billing_subscribe),
     path("billing/purchase-credits/", views.billing_purchase_credits),
+    path(
+        "billing/confirm-credit-purchase/",
+        views.billing_confirm_credit_purchase,
+    ),
     path("auth/shopify/launch/", views.oauth_launch),
     path("auth/shopify/", views.oauth_start),
     path("auth/shopify/callback/", views.oauth_callback),

@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from .models import (
+    AppSetting,
     CreditPack,
     CreditPurchase,
     CreditTransaction,
@@ -10,6 +11,12 @@ from .models import (
     Shop,
     SubscriptionPlan,
 )
+
+
+@admin.register(AppSetting)
+class AppSettingAdmin(admin.ModelAdmin):
+    list_display = ("key", "updated_at")
+    search_fields = ("key",)
 
 
 @admin.register(SubscriptionPlan)

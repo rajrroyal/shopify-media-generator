@@ -31,18 +31,18 @@ from .serializers import (
     ShopSerializer,
     SubscriptionPlanSerializer,
 )
-from .services import (
+from .services.credits import reserve_credits, update_credit_purchase
+from .services.prompts import generate_prompt_ideas
+from .services.shopify import (
     ShopifyClient,
     ShopifyReauthorizationRequired,
     build_oauth_url,
     exchange_oauth_code,
-    generate_prompt_ideas,
-    reserve_credits,
-    update_credit_purchase,
+    store_shopify_tokens,
     verify_shopify_hmac,
     verify_webhook_hmac,
 )
-from .tasks import generate_image_task
+from .tasks import process_generated_image
 
 
 def default_plan():
@@ -206,10 +206,20 @@ class JobDetailView(APIView):
 class GeneratePromptsView(APIView):
     def post(self, request, job_id):
         job = get_object_or_404(GenerationJob, pk=job_id, shop=request.user)
-        prompts = generate_prompt_ideas(job.product_data)
+        try:
+            prompts = generate_prompt_ideas(job.product_data, job.source_images)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except Exception:
+            return Response({"detail": "Could not generate AI image prompts."}, status=502)
         job.prompts.all().delete()
         GeneratedPrompt.objects.bulk_create([
-            GeneratedPrompt(job=job, prompt=prompt, sort_order=index)
+            GeneratedPrompt(
+                job=job,
+                title=prompt["title"],
+                prompt=prompt["description"],
+                sort_order=index,
+            )
             for index, prompt in enumerate(prompts)
         ])
         job.status = GenerationJob.Status.PROMPTS_READY
@@ -248,8 +258,9 @@ class GenerateImagesView(APIView):
         job.status = GenerationJob.Status.QUEUED
         job.save(update_fields=["status"])
         for image in images:
-            generate_image_task.delay(image.pk)
-        return Response(JobSerializer(job, context={"request": request}).data, status=202)
+            process_generated_image(image.pk)
+        job.refresh_from_db()
+        return Response(JobSerializer(job, context={"request": request}).data)
 
 
 class AddToShopifyView(APIView):
@@ -278,8 +289,9 @@ class RegenerateImageView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
         replacement = GeneratedImage.objects.create(job=job, prompt=original.prompt)
-        generate_image_task.delay(replacement.pk)
-        return Response(JobSerializer(job, context={"request": request}).data, status=202)
+        process_generated_image(replacement.pk)
+        job.refresh_from_db()
+        return Response(JobSerializer(job, context={"request": request}).data)
 
 
 @api_view(["GET"])
@@ -328,11 +340,10 @@ def oauth_callback(request):
     shop, _ = Shop.objects.update_or_create(
         shop_domain=shop_domain,
         defaults={
-            "access_token": token["access_token"],
-            "scope": token.get("scope", ""),
             "is_active": True,
         },
     )
+    store_shopify_tokens(shop, token)
     if not shop.plan_id:
         shop.plan = default_plan()
         if shop.plan:
@@ -402,7 +413,7 @@ def billing_subscribe(request):
     if not plan or plan.price == 0:
         return Response({"detail": "Choose a paid plan."}, status=400)
     if not request.user.access_token:
-        return Response({"detail": "Connect Shopify before subscribing."}, status=400)
+        raise ShopifyReauthorizationRequired()
     mutation = """
     mutation Subscribe(
       $name: String!,
@@ -467,7 +478,7 @@ def billing_purchase_credits(request):
     if not pack:
         return Response({"detail": "Choose a valid credit pack."}, status=400)
     if not request.user.access_token:
-        return Response({"detail": "Connect Shopify before purchasing credits."}, status=400)
+        raise ShopifyReauthorizationRequired()
 
     purchase = CreditPurchase.objects.create(
         shop=request.user,
@@ -475,10 +486,8 @@ def billing_purchase_credits(request):
         pack_name=pack.name,
         credits=pack.credits,
         amount=pack.price,
-        shopify_name="pending",
+        shopify_name=f"PixelMint {pack.credits} credit pack",
     )
-    purchase.shopify_name = f"PixelMint {pack.credits} credits [{purchase.reference}]"
-    purchase.save(update_fields=["shopify_name"])
 
     return_params = {
         "shop": request.user.shop_domain,
@@ -532,6 +541,56 @@ def billing_purchase_credits(request):
     purchase.status = result["appPurchaseOneTime"]["status"]
     purchase.save(update_fields=["shopify_purchase_id", "status", "updated_at"])
     return Response({"confirmation_url": result["confirmationUrl"]})
+
+
+@api_view(["POST"])
+def billing_confirm_credit_purchase(request):
+    try:
+        purchase = CreditPurchase.objects.get(
+            shop=request.user,
+            reference=request.data.get("reference"),
+        )
+    except (CreditPurchase.DoesNotExist, ValueError):
+        return Response({"detail": "Credit purchase not found."}, status=404)
+    if not purchase.shopify_purchase_id:
+        return Response(
+            {"detail": "Shopify has not registered this purchase yet."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    query = """
+    query CreditPurchaseStatus($id: ID!) {
+      node(id: $id) {
+        ... on AppPurchaseOneTime { id status }
+      }
+    }
+    """
+    try:
+        node = ShopifyClient(request.user).graphql(
+            query,
+            {"id": purchase.shopify_purchase_id},
+        )["node"]
+    except ShopifyReauthorizationRequired:
+        raise
+    except Exception:
+        return Response(
+            {"detail": "Could not verify the purchase with Shopify."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    if not node or node.get("id") != purchase.shopify_purchase_id:
+        return Response(
+            {"detail": "Shopify could not find this purchase."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    purchase = update_credit_purchase(purchase, node["status"].upper())
+    request.user.refresh_from_db()
+    return Response({
+        "status": purchase.status,
+        "credited": purchase.credited_at is not None,
+        "credits_balance": request.user.credits_balance,
+        "purchased_credits_balance": request.user.purchased_credits_balance,
+    })
 
 
 @api_view(["POST"])

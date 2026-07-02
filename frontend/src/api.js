@@ -1,5 +1,4 @@
 const API_ROOT = import.meta.env.VITE_API_URL || '/api';
-let sessionTokenPromise = null;
 
 function shopDomain() {
   return new URLSearchParams(location.search).get('shop') || '';
@@ -21,37 +20,39 @@ function apiUrl(path) {
 function beginShopifyAuth() {
   const current = new URLSearchParams(location.search);
   const shop = shopDomain();
-  if (!shop || sessionStorage.getItem('shopify-auth-redirecting')) return;
-  sessionStorage.setItem('shopify-auth-redirecting', 'true');
+  const redirectStartedAt = Number(sessionStorage.getItem('shopify-auth-redirecting'));
+  if (!shop || (redirectStartedAt && Date.now() - redirectStartedAt < 10000)) return;
+  sessionStorage.setItem('shopify-auth-redirecting', String(Date.now()));
   const params = new URLSearchParams({shop});
   if (current.get('host')) params.set('host', current.get('host'));
   window.open(`${API_ROOT}/auth/shopify/launch/?${params}`, '_top');
 }
 
-async function request(path, options = {}) {
-  if (!sessionTokenPromise) {
-    const initialToken = launchToken();
-    sessionTokenPromise = Promise.race([
-      window.shopify?.idToken
-        ? window.shopify.idToken().catch(() => initialToken)
-        : Promise.resolve(initialToken),
-      new Promise(resolve => setTimeout(() => resolve(initialToken), 3000)),
-    ]);
-    setTimeout(() => { sessionTokenPromise = null; }, 30000);
-  }
-  const sessionToken = await sessionTokenPromise;
+async function currentSessionToken() {
+  const initialToken = launchToken();
+  return Promise.race([
+    window.shopify?.idToken
+      ? window.shopify.idToken().catch(() => initialToken)
+      : Promise.resolve(initialToken),
+    new Promise(resolve => setTimeout(() => resolve(initialToken), 3000)),
+  ]);
+}
+
+async function request(path, options = {}, retryAuthentication = true) {
+  const sessionToken = await currentSessionToken();
+  const {timeoutMs = 45000, ...fetchOptions} = options;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(apiUrl(path), {
-      ...options,
-      signal: options.signal || controller.signal,
+      ...fetchOptions,
+      signal: fetchOptions.signal || controller.signal,
       headers: {
         'Content-Type': 'application/json',
         'X-Shop-Domain': shopDomain(),
         ...(sessionToken ? {Authorization: `Bearer ${sessionToken}`} : {}),
-        ...options.headers,
+        ...fetchOptions.headers,
       },
     });
   } catch (error) {
@@ -64,6 +65,9 @@ async function request(path, options = {}) {
   }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
+    if (response.status === 401 && retryAuthentication && sessionToken) {
+      return request(path, options, false);
+    }
     if (response.status === 401) beginShopifyAuth();
     const errorMessages = Array.isArray(payload.errors)
       ? payload.errors.map(error => error.message || String(error)).join('; ')
@@ -85,7 +89,9 @@ export const api = {
   }),
   generatePrompts: (jobId) => request(`/generation/jobs/${jobId}/generate-prompts/`, {method: 'POST'}),
   generateImages: (jobId, prompts) => request(`/generation/jobs/${jobId}/generate-images/`, {
-    method: 'POST', body: JSON.stringify({prompts}),
+    method: 'POST',
+    body: JSON.stringify({prompts}),
+    timeoutMs: 15 * 60 * 1000,
   }),
   addToShopify: (jobId, imageIds) => request(`/generation/jobs/${jobId}/add-to-shopify/`, {
     method: 'POST', body: JSON.stringify({image_ids: imageIds}),
@@ -96,5 +102,8 @@ export const api = {
   }),
   purchaseCredits: packId => request('/billing/purchase-credits/', {
     method: 'POST', body: JSON.stringify({pack_id: packId}),
+  }),
+  confirmCreditPurchase: reference => request('/billing/confirm-credit-purchase/', {
+    method: 'POST', body: JSON.stringify({reference}),
   }),
 };

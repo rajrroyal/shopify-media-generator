@@ -1,11 +1,9 @@
-from celery import shared_task
-
 from .models import GeneratedImage, GenerationJob
-from .services import generate_image, refund_credit
+from .services.credits import refund_credit
+from .services.images import generate_image
 
 
-@shared_task
-def generate_image_task(image_id):
+def process_generated_image(image_id):
     image = GeneratedImage.objects.select_related("job", "prompt", "job__shop").get(pk=image_id)
     try:
         generate_image(image)
@@ -27,4 +25,3 @@ def generate_image_task(image_id):
         else:
             job.status = GenerationJob.Status.FAILED
         job.save(update_fields=["status"])
-
