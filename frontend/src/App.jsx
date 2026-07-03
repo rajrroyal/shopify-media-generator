@@ -3,6 +3,7 @@ import {
   Badge, Banner, Button, Checkbox, EmptyState, Frame, ProgressBar,
   Select, TextField, Toast,
 } from '@shopify/polaris';
+import logo from './assets/pixelmint.jpg';
 import {Link, NavLink, Route, Routes, useNavigate, useParams} from 'react-router-dom';
 import {api} from './api';
 import {demoJobs, demoProducts, generatedImages, promptIdeas} from './demo';
@@ -173,8 +174,8 @@ function App() {
       <div className="app-shell">
         <header className="topbar">
           <Link className="brand" to={shopifyTo('/')}>
-            <span className="brand-mark">P</span>
-            <span>PixelMint <b>AI</b></span>
+            <img className="brand-logo" src={logo} alt="PixelMint logo" />
+            <span>PixelMint <sup className="brand-sup">AI</sup></span>
           </Link>
           <nav className="top-nav" aria-label="Primary navigation">
             {navigation.map(([to, label, icon]) => (
