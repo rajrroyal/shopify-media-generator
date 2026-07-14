@@ -78,6 +78,8 @@ def _image_input_url(image_url):
 def generate_prompt_ideas(product, source_images=None):
     title = product.get("title", "product")
     description = product.get("description", "")
+    vendor = product.get("vendor", "")
+    product_type = product.get("product_type", "")
     primary_image_url, product_dimensions = _primary_product_image(
         product,
         source_images or [],
@@ -91,6 +93,8 @@ def generate_prompt_ideas(product, source_images=None):
         .replace("{product_dimensions}", product_dimensions)
         .replace("{product_title}", str(title or ""))
         .replace("{product_description}", str(description or ""))
+        .replace("{product_vendor}", str(vendor or ""))
+        .replace("{product_type}", str(product_type or ""))
         .replace("\r\n", "\n")
         .strip()
     )
@@ -99,7 +103,9 @@ def generate_prompt_ideas(product, source_images=None):
             {
                 "title": setup,
                 "description": (
-                    f"{setup} product photograph of {title}. Preserve the exact shape, "
+                    f"{setup} product photograph of {title}"
+                    f"{(' by ' + vendor) if vendor else ''}"
+                    f"{(' (' + product_type + ')') if product_type else ''}. Preserve the exact shape, "
                     f"colors, materials, branding, proportions, and label. "
                     f"Reference dimensions: {product_dimensions}."
                 ),

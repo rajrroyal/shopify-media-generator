@@ -33,6 +33,8 @@ class PromptGenerationTests(TestCase):
         self.product = {
             "title": "Test bottle",
             "description": "A blue glass bottle",
+            "vendor": "Example Brand",
+            "product_type": "Glassware",
             "images": [
                 {"url": "https://cdn.example.com/one.jpg", "width": 800, "height": 1200},
                 {"url": "https://cdn.example.com/two.jpg", "width": 1600, "height": 900},
