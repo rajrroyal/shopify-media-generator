@@ -109,6 +109,10 @@ class Shop(AbstractBaseUser, PermissionsMixin):
 
 
 class GenerationJob(models.Model):
+    class Kind(models.TextChoices):
+        IMAGE = "image", "Image"
+        VIDEO = "video", "Video"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         PROMPTS_READY = "prompts_ready", "Prompts ready"
@@ -121,6 +125,7 @@ class GenerationJob(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="generation_jobs")
     shopify_product_id = models.CharField(max_length=100)
+    kind = models.CharField(max_length=10, choices=Kind.choices, default=Kind.IMAGE)
     product_data = models.JSONField(default=dict)
     status = models.CharField(max_length=30, choices=Status.choices, default=Status.DRAFT)
     source_images = models.JSONField(default=list)
@@ -171,6 +176,41 @@ class GeneratedImage(models.Model):
         if self.image:
             return self.image.url
         return self.image_url
+
+
+def generated_video_path(instance, filename):
+    return f"generated/{instance.job.shop_id}/{instance.job_id}/{uuid.uuid4()}-{filename}"
+
+
+class GeneratedVideo(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        QUEUED = "queued", "Queued"
+        PROCESSING = "processing", "Processing"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    job = models.OneToOneField(GenerationJob, on_delete=models.CASCADE, related_name="video")
+    title = models.CharField(max_length=120, blank=True)
+    prompt = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    model_id = models.CharField(max_length=255, blank=True)
+    provider_request_id = models.CharField(max_length=255, blank=True, db_index=True)
+    provider_video_url = models.URLField(max_length=2000, blank=True)
+    video = models.FileField(upload_to=generated_video_path, blank=True)
+    thumbnail_url = models.URLField(max_length=2000, blank=True)
+    settings = models.JSONField(default=dict)
+    provider_metadata = models.JSONField(default=dict)
+    error_message = models.TextField(blank=True)
+    shopify_media_id = models.CharField(max_length=255, blank=True)
+    shopify_status = models.CharField(max_length=30, blank=True)
+    added_to_shopify_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def resolved_url(self):
+        return self.video.url if self.video else self.provider_video_url
 
 
 class CreditTransaction(models.Model):

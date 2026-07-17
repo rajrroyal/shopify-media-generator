@@ -6,7 +6,7 @@ from ..models import CreditPurchase, CreditTransaction, Shop
 
 
 @transaction.atomic
-def reserve_credits(job, amount):
+def reserve_credits(job, amount, reason="AI image generation"):
     shop = Shop.objects.select_for_update().get(pk=job.shop_id)
     if shop.credits_balance < amount:
         raise ValueError("Not enough credits")
@@ -23,7 +23,7 @@ def reserve_credits(job, amount):
         amount=amount,
         plan_amount=plan_amount,
         purchased_amount=purchased_amount,
-        reason="AI image generation",
+        reason=reason,
         job=job,
     )
 

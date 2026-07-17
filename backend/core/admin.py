@@ -7,6 +7,7 @@ from .models import (
     CreditTransaction,
     GeneratedImage,
     GeneratedPrompt,
+    GeneratedVideo,
     GenerationJob,
     Shop,
     SubscriptionPlan,
@@ -143,3 +144,12 @@ class GeneratedImageAdmin(admin.ModelAdmin):
     search_fields = ("job__id", "job__shop__shop_domain", "shopify_media_id")
     readonly_fields = ("created_at",)
     autocomplete_fields = ("job", "prompt")
+
+
+@admin.register(GeneratedVideo)
+class GeneratedVideoAdmin(admin.ModelAdmin):
+    list_display = ("id", "job", "status", "model_id", "added_to_shopify_at", "created_at")
+    list_filter = ("status", "created_at")
+    search_fields = ("job__id", "provider_request_id", "shopify_media_id")
+    readonly_fields = ("created_at", "updated_at")
+    autocomplete_fields = ("job",)

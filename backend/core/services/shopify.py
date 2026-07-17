@@ -162,6 +162,73 @@ class ShopifyClient:
             image.added_to_shopify_at = now
             image.save(update_fields=["added_to_shopify_at"])
 
+    def attach_video(self, job, video):
+        if not video.video:
+            raise RuntimeError("The generated video file is not available for upload.")
+
+        filename = video.video.name.rsplit("/", 1)[-1] or f"video-{video.pk}.mp4"
+        staged = self.graphql(
+            """
+            mutation StageProductVideo($input: [StagedUploadInput!]!) {
+              stagedUploadsCreate(input: $input) {
+                stagedTargets { url resourceUrl parameters { name value } }
+                userErrors { field message }
+              }
+            }
+            """,
+            {"input": [{
+                "filename": filename,
+                "mimeType": "video/mp4",
+                "httpMethod": "POST",
+                "resource": "VIDEO",
+                "fileSize": str(video.video.size),
+            }]},
+        )["stagedUploadsCreate"]
+        if staged["userErrors"]:
+            raise RuntimeError(f"Shopify could not prepare the video upload: {staged['userErrors']}")
+        if not staged["stagedTargets"]:
+            raise RuntimeError("Shopify did not return a video upload target.")
+
+        target = staged["stagedTargets"][0]
+        fields = {item["name"]: item["value"] for item in target["parameters"]}
+        with video.video.open("rb") as source:
+            upload = httpx.post(
+                target["url"],
+                data=fields,
+                files={"file": (filename, source, "video/mp4")},
+                timeout=120,
+            )
+        upload.raise_for_status()
+
+        alt = f"{job.product_data.get('title', 'Product')} — AI generated product video"
+        mutation = """
+        mutation AddProductVideo($product: ProductUpdateInput!, $media: [CreateMediaInput!]) {
+          productUpdate(product: $product, media: $media) {
+            product { id media(first: 100) { nodes { id status mediaContentType alt } } }
+            userErrors { field message }
+          }
+        }
+        """
+        result = self.graphql(mutation, {
+            "product": {"id": job.shopify_product_id},
+            "media": [{
+                "originalSource": target["resourceUrl"],
+                "mediaContentType": "VIDEO",
+                "alt": alt,
+            }],
+        })["productUpdate"]
+        if result["userErrors"]:
+            raise RuntimeError(f"Shopify could not attach the video: {result['userErrors']}")
+        videos = [
+            node for node in result["product"]["media"]["nodes"]
+            if node["mediaContentType"] == "VIDEO" and node.get("alt") == alt
+        ]
+        created = videos[-1] if videos else {}
+        video.shopify_media_id = created.get("id", "")
+        video.shopify_status = created.get("status", "UPLOADED")
+        video.added_to_shopify_at = timezone.now()
+        video.save(update_fields=["shopify_media_id", "shopify_status", "added_to_shopify_at", "updated_at"])
+
     @staticmethod
     def _public_image_url(image):
         url = image.resolved_url
@@ -170,6 +237,14 @@ class ShopifyClient:
         if not settings.FRONTEND_URL:
             raise RuntimeError("FRONTEND_URL is required to publish locally stored images.")
         return urljoin(f"{settings.FRONTEND_URL}/", url.lstrip("/"))
+
+    @staticmethod
+    def _public_media_url(url):
+        if url.startswith(("https://", "http://")):
+            return url
+        if not settings.BACKEND_URL:
+            raise RuntimeError("BACKEND_URL is required to publish locally stored videos.")
+        return urljoin(f"{settings.BACKEND_URL}/", url.lstrip("/"))
 
 
 def build_oauth_url(shop_domain):

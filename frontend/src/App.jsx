@@ -3,19 +3,18 @@ import {
   Badge, Banner, Button, Checkbox, EmptyState, Frame, ProgressBar,
   Select, TextField, Toast,
 } from '@shopify/polaris';
-import logo from './assets/pixelmint.jpg';
-import {Link, NavLink, Route, Routes, useNavigate, useParams} from 'react-router-dom';
+import {Link, Route, Routes, useNavigate, useParams} from 'react-router-dom';
 import {api} from './api';
 import {demoJobs, demoProducts, generatedImages, promptIdeas} from './demo';
 
 const demoMode = import.meta.env.VITE_DEMO_MODE === 'true';
 
 const navigation = [
-  ['/', 'Overview', '◈'],
-  ['/products', 'Products', '▦'],
-  ['/generate', 'Create', '✦'],
-  ['/history', 'History', '↺'],
-  ['/billing', 'Plan & credits', '◇'],
+  ['/products', 'Products'],
+  ['/generate', 'Generate images'],
+  ['/generate-video', 'Generate video'],
+  ['/history', 'History'],
+  ['/billing', 'Plan & credits'],
 ];
 
 function shopifySearch() {
@@ -54,6 +53,24 @@ function promptTitle(value, index) {
   const scene = text.match(/^(.{3,55}?)(?:\s+photograph|\s+photo|\s+image|\s+of\b)/i)?.[1];
   const title = scene || text.split(' ').slice(0, 5).join(' ');
   return title || `Custom idea ${index + 1}`;
+}
+
+function formatVideoPrompt(value = '') {
+  const labels = [
+    'Concept', 'Opening shot', 'Camera movement', 'Product motion',
+    'Setting', 'Lighting', 'Pacing', 'Final hero shot',
+  ];
+  let formatted = value.replace(/\r\n/g, '\n').trim();
+  labels.forEach(label => {
+    const expression = new RegExp(`\\s*${label}:\\s*`, 'gi');
+    formatted = formatted.replace(expression, match => {
+      const normalized = `${label}: `;
+      return formatted.toLowerCase().startsWith(match.trim().toLowerCase())
+        ? normalized
+        : `\n\n${normalized}`;
+    });
+  });
+  return formatted.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function PromptEditor({editor, onChange, onSave, onClose}) {
@@ -139,8 +156,8 @@ function App() {
   const [products, setProducts] = useState(demoMode ? demoProducts : []);
   const [jobs, setJobs] = useState(demoMode ? demoJobs : []);
   const [account, setAccount] = useState(demoMode
-    ? {shop_name: 'Aurelia Goods', shop_domain: 'demo-store.myshopify.com', plan: 'pro', credits_balance: 86, credit_limit: 400, images_this_month: 42}
-    : {shop_name: '', shop_domain: '', plan: 'free', credits_balance: 0, credit_limit: 10, images_this_month: 0, products_enhanced: 0});
+    ? {shop_name: 'Aurelia Goods', shop_domain: 'demo-store.myshopify.com', plan: 'pro', credits_balance: 86, credit_limit: 400, images_this_month: 42, videos_this_month: 7, products_enhanced: 18}
+    : {shop_name: '', shop_domain: '', plan: 'free', credits_balance: 0, credit_limit: 10, images_this_month: 0, videos_this_month: 0, products_enhanced: 0});
   const [loading, setLoading] = useState(!demoMode);
   const [apiError, setApiError] = useState('');
 
@@ -166,30 +183,12 @@ function App() {
     loadAccount();
   }, []);
 
-  const storeName = account.shop_name || account.shop_domain || 'Your store';
-  const initial = storeName.charAt(0).toUpperCase();
-
   return (
     <Frame>
+      <s-app-nav>
+        {navigation.map(([to, label]) => <s-link href={shopifyTo(to)} key={to}>{label}</s-link>)}
+      </s-app-nav>
       <div className="app-shell">
-        <header className="topbar">
-          <Link className="brand" to={shopifyTo('/')}>
-            <img className="brand-logo" src={logo} alt="PixelMint logo" />
-            <span>PixelMint <sup className="brand-sup">AI</sup></span>
-          </Link>
-          <nav className="top-nav" aria-label="Primary navigation">
-            {navigation.map(([to, label, icon]) => (
-              <NavLink key={to} to={shopifyTo(to)} end={to === '/'} className={({isActive}) => isActive ? 'nav-link active' : 'nav-link'}>
-                <span>{icon}</span>{label}
-              </NavLink>
-            ))}
-          </nav>
-          <div className="topbar-account">
-            <Link className="credit-pill" to={shopifyTo('/billing')}>
-              <span>✦</span><strong>{account.credits_balance}</strong><small>credits</small>
-            </Link>
-          </div>
-        </header>
         <main className="main">
           {loading && <AppMessage tone="info" title="Preparing your workspace" message="Loading your store details and recent generations…" />}
           {demoMode && <AppMessage tone="info" title="Demo mode" message="Shopify publishing is paused while demo mode is active." />}
@@ -199,6 +198,8 @@ function App() {
             <Route path="/products" element={<Products products={products} setProducts={setProducts} />} />
             <Route path="/generate" element={<Generate products={products} setProducts={setProducts} setJobs={setJobs} account={account} setAccount={setAccount} demo={demoMode} />} />
             <Route path="/generate/:productId" element={<Generate products={products} setProducts={setProducts} setJobs={setJobs} account={account} setAccount={setAccount} demo={demoMode} />} />
+            <Route path="/generate-video" element={<GenerateVideo products={products} setProducts={setProducts} setJobs={setJobs} setAccount={setAccount} demo={demoMode} />} />
+            <Route path="/generate-video/:productId" element={<GenerateVideo products={products} setProducts={setProducts} setJobs={setJobs} setAccount={setAccount} demo={demoMode} />} />
             <Route path="/history" element={<History jobs={jobs} />} />
             <Route path="/billing" element={<Billing account={account} setAccount={setAccount} />} />
           </Routes>
@@ -221,39 +222,42 @@ function PageHeader({eyebrow, title, description, action}) {
 }
 
 function Dashboard({account, jobs, loading}) {
-  const today = new Intl.DateTimeFormat(undefined, {weekday: 'long', month: 'long', day: 'numeric'}).format(new Date()).toUpperCase();
-  const hour = new Date().getHours();
-  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
-  const merchant = account.shop_name || account.shop_domain?.split('.')[0] || 'there';
+  const imageJob = jobs.find(job => job.kind !== 'video' && (job.images?.[0]?.url || job.product?.images?.[0]?.url));
+  const videoJob = jobs.find(job => job.kind === 'video');
+  const imageFeature = imageJob?.images?.[0]?.url || imageJob?.product?.images?.[0]?.url || jobs[0]?.product?.images?.[0]?.url;
+  const videoFeature = videoJob?.video?.url || videoJob?.product?.images?.[0]?.url || imageFeature;
+  const recentMedia = jobs.flatMap(job => job.kind === 'video'
+    ? [{id: `video-${job.id}`, type: 'video', url: job.video?.url, fallback: job.product?.images?.[0]?.url, status: job.video?.status}]
+    : (job.images?.length ? job.images : job.product?.images?.slice(0, 1) || []).map(item => ({id: `image-${job.id}-${item.id || item.url}`, type: 'image', url: item.url, status: item.status || job.status})))
+    .filter(item => item.url || item.fallback)
+    .slice(0, 8);
+  const workflows = [
+    ['▧', 'Studio refresh', 'Clean product shots', '/generate'],
+    ['⌁', 'Lifestyle scene', 'Real-world settings', '/generate'],
+    ['✦', 'Campaign image', 'Bold branded visuals', '/generate'],
+    ['▶', 'Product ad', 'Short ad for sales', '/generate-video'],
+    ['◉', 'Motion showcase', 'Bring products to life', '/generate-video'],
+    ['▯', 'Social reel', 'Vertical-ready video', '/generate-video'],
+  ];
   return <div className="page">
-    <PageHeader eyebrow={today} title={`${greeting}, ${merchant}.`} description={loading ? 'Loading your current store…' : 'Your catalog is ready for something fresh.'} action={<Button variant="primary" url={shopifyTo('/generate')}>✦ Create product images</Button>} />
-    <section className="metrics">
-      <div className="metric accent"><span className="metric-icon">✦</span><span>Credits available</span><strong>{account.credits_balance}</strong><small>of {account.credit_limit || 10} this month</small></div>
-      <div className="metric"><span className="metric-icon mint">↗</span><span>Images this month</span><strong>{account.images_this_month || 0}</strong><small>completed generations</small></div>
-      <div className="metric"><span className="metric-icon sand">▦</span><span>Products enhanced</span><strong>{account.products_enhanced || 0}</strong><small>published to Shopify</small></div>
+    <header className="overview-hero">
+      <div><span className="eyebrow">OVERVIEW</span><h1>Create product visuals that earn attention.</h1><p>{loading ? 'Loading your creative workspace…' : 'Generate polished images and motion-led videos designed for storefronts, ads and social.'}</p></div>
+      <div className="overview-actions"><Link className="overview-credit" to={shopifyTo('/billing')}>✦ <strong>{account.credits_balance}</strong> credits</Link><Button variant="primary" url={shopifyTo('/generate')}>▧ Generate images</Button><Button variant="primary" url={shopifyTo('/generate-video')}>▶ Generate video</Button></div>
+    </header>
+    <section className="overview-metrics">
+      <div className="overview-metric credit"><span>Credits available</span><strong>{account.credits_balance}</strong><small>of {account.credit_limit || 10} this month</small><b>✦</b></div>
+      <div className="overview-metric"><span>Images created this month</span><strong>{account.images_this_month || 0}</strong><small>completed image generations</small><b className="green">▧</b></div>
+      <div className="overview-metric"><span>Videos created this month</span><strong>{account.videos_this_month || 0}</strong><small>completed video generations</small><b className="violet">▶</b></div>
+      <div className="overview-metric"><span>Products enhanced</span><strong>{account.products_enhanced || 0}</strong><small>published to Shopify</small><b className="sand">▦</b></div>
     </section>
-    <section className="split">
-      <div className="panel">
-        <div className="panel-title"><div><span className="eyebrow">QUICK START</span><h2>Make something beautiful</h2></div><span className="spark">✦</span></div>
-        <div className="idea-grid">
-          {[['Studio refresh', 'Clean, conversion-ready product shots', '01'], ['In the wild', 'Lifestyle scenes with real atmosphere', '02'], ['Campaign mode', 'Bold creative for your next launch', '03']].map(([title, copy, number]) =>
-            <Link to={shopifyTo('/generate')} className="idea" key={title}><span>{number}</span><div><strong>{title}</strong><small>{copy}</small></div><b>→</b></Link>)}
-        </div>
-      </div>
-      <div className="panel tip-card"><span className="eyebrow">CREATIVE NOTE</span><blockquote>“Keep the product true. Change the world around it.”</blockquote><p>Reference images help PixelMint preserve the details your customers care about.</p><Link to={shopifyTo('/generate')}>Start with a reference →</Link></div>
+    <section className="creation-promos">
+      <article className="creation-promo images"><div className="promo-media">{imageFeature ? <img src={imageFeature} alt="Generated product example" /> : <span>▧</span>}</div><div className="promo-copy"><span className="promo-icon">▧</span><div><h2>Product images</h2><p>Create conversion-ready visuals for every stage of your customer journey.</p><ul><li>Studio-quality product shots</li><li>Lifestyle and ambient scenes</li><li>Background refreshes and variations</li></ul><Button url={shopifyTo('/generate')}>Generate product images →</Button></div></div></article>
+      <article className="creation-promo videos"><div className="promo-media">{videoJob?.video?.url ? <video src={videoFeature} muted playsInline preload="metadata" /> : videoFeature ? <img src={videoFeature} alt="Product video example" /> : <span>▶</span>}<i>▶</i></div><div className="promo-copy"><span className="promo-icon">▶</span><div><h2>Product videos</h2><p>Turn your catalog into engaging product ads, showcases and social reels.</p><ul><li>Motion-led product advertisements</li><li>Product detail and feature showcases</li><li>Short clips for campaigns and reels</li></ul><Button url={shopifyTo('/generate-video')}>Generate product video →</Button></div></div></article>
     </section>
-    <section className="panel recent">
-      <div className="panel-title"><div><span className="eyebrow">RECENT WORK</span><h2>Latest generations</h2></div><Button variant="plain" url={shopifyTo('/history')}>View all</Button></div>
-      {jobs.length
-        ? <div className="job-list">{jobs.slice(0, 3).map(job => <JobRow job={job} key={job.id} />)}</div>
-        : <div className="inline-empty"><span>✦</span><div><strong>Your first image set starts here</strong><small>Choose a Shopify product and create a polished campaign in minutes.</small></div><Button url={shopifyTo('/products')}>Browse products</Button></div>}
+    <section className="overview-section quick-workflows"><div className="overview-section-heading"><div><strong>Quick start</strong><small>Jump into popular image and video workflows.</small></div><Link to={shopifyTo('/products')}>View products →</Link></div><div className="workflow-grid">{workflows.map(([icon, title, copy, route]) => <Link to={shopifyTo(route)} className={route.includes('video') ? 'workflow video' : 'workflow'} key={title}><span>{icon}</span><div><strong>{title}</strong><small>{copy}</small></div><b>→</b></Link>)}</div></section>
+    <section className="overview-section recent-work"><div className="overview-section-heading"><div><strong>Recent work</strong><small>Your latest generated images and videos.</small></div><Link to={shopifyTo('/history')}>View history →</Link></div>{recentMedia.length ? <div className="recent-media-grid">{recentMedia.map(item => <div className={`recent-media ${item.type}`} key={item.id}>{item.type === 'video' && item.url ? <video src={item.url} muted playsInline preload="metadata" /> : <img src={item.url || item.fallback} alt="" />}<span>{item.type === 'video' ? '▶' : '▧'}</span>{item.type === 'video' && <i>▶</i>}</div>)}</div> : <div className="inline-empty"><span>✦</span><div><strong>Your first campaign starts here</strong><small>Create an image set or product video to fill your workspace.</small></div><Button url={shopifyTo('/products')}>Browse products</Button></div>}
     </section>
   </div>;
-}
-
-function JobRow({job}) {
-  const image = job.images?.[0]?.url || job.product.images?.[0]?.url;
-  return <div className="job-row">{image ? <img src={image} alt="" /> : <span className="job-placeholder">✦</span>}<div><strong>{job.product.title}</strong><small>{new Date(job.created_at).toLocaleDateString()} · {job.images?.length || 0} images</small></div><Badge tone={job.status === 'completed' ? 'success' : 'attention'}>{job.status}</Badge><span className="muted">{job.credits_used} credits</span></div>;
 }
 
 function Products({products, setProducts}) {
@@ -308,7 +312,7 @@ function ProductCard({product}) {
   const navigate = useNavigate();
   return <article className="product-card">
     <div className="product-image">{product.images?.[0]?.url ? <img src={product.images[0].url} alt="" /> : <span className="image-placeholder">No product image</span>}<Badge tone={product.status === 'ACTIVE' ? 'success' : 'attention'}>{product.status}</Badge></div>
-    <div className="product-copy"><span>{product.vendor}</span><h3>{product.title}</h3><small>{product.product_type}</small><Button variant="primary" onClick={() => navigate(shopifyTo(`/generate/${product.id}`))}>Create images</Button></div>
+    <div className="product-copy"><span>{product.vendor}</span><h3>{product.title}</h3><small>{product.product_type}</small><div className="product-actions"><Button variant="primary" onClick={() => navigate(shopifyTo(`/generate/${product.id}`))}>Generate images</Button><Button onClick={() => navigate(shopifyTo(`/generate-video/${product.id}`))}>Generate video</Button></div></div>
   </article>;
 }
 
@@ -615,6 +619,125 @@ function Generate({products, setProducts, setJobs, account, setAccount, demo}) {
   </div>;
 }
 
+function GenerateVideo({products, setProducts, setJobs, setAccount, demo}) {
+  const {productId: routeProductId} = useParams();
+  const productId = routeProductId || actionProductId();
+  const navigate = useNavigate();
+  const [product, setProduct] = useState(products.find(item => String(item.id) === productId) || null);
+  const [references, setReferences] = useState([]);
+  const [step, setStep] = useState(productId ? 2 : 1);
+  const [job, setJob] = useState(null);
+  const [prompt, setPrompt] = useState('');
+  const [duration, setDuration] = useState('6');
+  const [quality, setQuality] = useState('quality');
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState('');
+
+  useEffect(() => {
+    if (product) {
+      if (!references.length && product.images?.length) setReferences([0]);
+      return;
+    }
+    const local = products.find(item => String(item.id) === productId);
+    if (local) { setProduct(local); setReferences(local.images?.length ? [0] : []); return; }
+    if (demo) return;
+    const loader = productId ? api.product(productId) : api.products();
+    loader.then(result => {
+      const selected = productId ? result : result[0];
+      if (!productId) setProducts(result);
+      else setProducts(current => current.some(item => item.id === result.id) ? current : [result, ...current]);
+      setProduct(selected || null);
+      setReferences(selected?.images?.length ? [0] : []);
+    }).catch(error => setToast(error.message));
+  }, [productId, product, products, setProducts, demo, references.length]);
+
+  useEffect(() => {
+    if (!job?.id || !['queued', 'processing'].includes(job.video?.status)) return;
+    const timer = setInterval(async () => {
+      try {
+        const current = await api.job(job.id);
+        setJob(current);
+        setJobs(existing => [current, ...existing.filter(item => item.id !== current.id)]);
+        if (current.video?.status === 'completed') setStep(5);
+      } catch (error) { setToast(error.message); }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [job?.id, job?.video?.status, setJobs]);
+
+  function chooseProduct(item) {
+    setProduct(item);
+    setReferences(item.images?.length ? [0] : []);
+  }
+
+  function toggleReference(index) {
+    setReferences(current => current.includes(index)
+      ? current.filter(item => item !== index)
+      : current.length < 5 ? [...current, index] : current);
+  }
+
+  async function createPrompt() {
+    if (!product || !references.length) return;
+    setBusy(true);
+    try {
+      if (demo) {
+        setPrompt(formatVideoPrompt(`Concept: Create a polished product reel for ${product.title}. Preserve all real branding, colors, materials and proportions. Opening shot: Begin with an accurate product close-up. Camera movement: Use a smooth cinematic push-in. Product motion: Keep all movement natural and realistic. Setting: Use a clean premium environment. Lighting: Use soft directional studio light. Pacing: Keep the edit polished and readable. Final hero shot: Finish with an accurate centered product shot.`));
+        setStep(3);
+      } else {
+        const created = await api.createVideoJob(product.id, references.map(index => product.images[index]?.url).filter(Boolean));
+        const ready = await api.generateVideoPrompt(created.id);
+        setJob(ready);
+        setPrompt(formatVideoPrompt(ready.video.prompt));
+        setStep(3);
+      }
+    } catch (error) { setToast(error.message); }
+    finally { setBusy(false); }
+  }
+
+  async function generate() {
+    if (!prompt.trim()) return setToast('Enter a video prompt first.');
+    if (demo) return setToast('Connect Shopify and configure fal.ai to generate videos.');
+    setBusy(true);
+    try {
+      const submitted = await api.generateVideo(job.id, {prompt, duration, quality});
+      setJob(submitted);
+      setJobs(existing => [submitted, ...existing.filter(item => item.id !== submitted.id)]);
+      setAccount(current => ({...current, credits_balance: Math.max(0, current.credits_balance - submitted.video.credit_cost)}));
+      setStep(4);
+    } catch (error) {
+      setToast(error.message);
+      try {
+        const failed = await api.job(job.id);
+        setJob(failed);
+        setJobs(existing => [failed, ...existing.filter(item => item.id !== failed.id)]);
+        if (failed.video?.status === 'failed') setStep(4);
+      } catch (_) { /* Keep the original provider error visible. */ }
+    }
+    finally { setBusy(false); }
+  }
+
+  async function publish() {
+    setBusy(true);
+    try {
+      const published = await api.addVideoToShopify(job.id);
+      setJob(published);
+      setJobs(existing => [published, ...existing.filter(item => item.id !== published.id)]);
+      setToast('Video added to the Shopify product gallery. Shopify is processing it now.');
+    } catch (error) { setToast(error.message); }
+    finally { setBusy(false); }
+  }
+
+  return <div className="page wizard-page">
+    <PageHeader eyebrow="PRODUCT VIDEO" title="Create a product ad or reel" description="Turn product references into one ready-to-publish video." action={<Button url={shopifyTo('/generate')}>Create images instead</Button>} />
+    <div className="stepper">{['Product', 'References', 'Prompt', 'Generate', 'Publish'].map((label, index) => <div className={step >= index + 1 ? 'step active' : 'step'} key={label}><span>{index + 1}</span><small>{label}</small></div>)}</div>
+    {step === 1 && <section className="wizard-card"><span className="eyebrow">STEP 1 OF 5</span><h2>Select a product</h2><p className="lead">Choose the Shopify product this video will promote.</p><div className="compact-products">{products.map(item => <button className={product?.id === item.id ? 'compact-product selected' : 'compact-product'} key={item.id} onClick={() => chooseProduct(item)}>{item.images?.[0]?.url ? <img src={item.images[0].url} alt="" /> : <span />}<span><strong>{item.title}</strong><small>{item.product_type}</small></span><b>{product?.id === item.id ? '✓' : '→'}</b></button>)}</div><div className="wizard-actions"><span /><Button variant="primary" disabled={!product} onClick={() => setStep(2)}>Choose references →</Button></div></section>}
+    {step === 2 && product && <section className="wizard-card"><span className="eyebrow">STEP 2 OF 5</span><h2>Select reference images</h2><p className="lead">Choose up to five views. The first selected image becomes the opening frame.</p><div className="reference-grid">{product.images?.map((image, index) => <button className={references.includes(index) ? 'reference selected' : 'reference'} key={image.id || image.url} onClick={() => toggleReference(index)}><img src={image.url} alt="" /><span>{references.includes(index) ? `✓ ${references.indexOf(index) === 0 ? 'Opening frame' : 'Selected'}` : 'Select'}</span></button>)}</div><div className="wizard-actions"><Button onClick={() => productId ? navigate(shopifyTo('/products')) : setStep(1)}>Back</Button><Button variant="primary" loading={busy} disabled={!references.length} onClick={createPrompt}>Generate video prompt ✦</Button></div></section>}
+    {step === 3 && <section className="wizard-card wide video-prompt-card"><span className="eyebrow">STEP 3 OF 5</span><h2>Direct your video</h2><p className="lead">Review the AI direction, then adjust the motion, scene or pacing. Every video fills a vertical 9:16 frame while keeping the complete product image visible.</p><label className="prompt-editor-field"><span>Video prompt</span><textarea rows={12} maxLength={4000} value={prompt} onChange={event => setPrompt(event.target.value)} /></label><div className="video-options"><Select label="Duration" options={[{label: '6 seconds', value: '6'}, {label: '10 seconds', value: '10'}]} value={duration} onChange={setDuration} /><Select label="Quality" options={[{label: 'Preview', value: 'preview'}, {label: 'Quality', value: 'quality'}, {label: 'Premium', value: 'premium'}]} value={quality} onChange={setQuality} /></div><div className="prompt-summary"><span>{prompt.length.toLocaleString()} / 4,000 characters</span><div className="credit-cost">{job?.video?.credit_cost || 10} video credits</div></div><div className="wizard-actions"><Button onClick={() => setStep(2)}>Back</Button><Button variant="primary" loading={busy} onClick={generate}>Generate one video ▶</Button></div></section>}
+    {step === 4 && <section className="wizard-card generating"><div className="orb"><span>▶</span></div><span className="eyebrow">{job?.video?.status === 'failed' ? 'GENERATION FAILED' : 'FAL.AI IS GENERATING'}</span><h2>{job?.video?.status === 'processing' ? 'Your product is in motion' : 'Your video is queued'}</h2><p>{job?.video?.error_message || 'Video generation can take several minutes. You can leave this page and return through History.'}</p>{job?.video?.status === 'failed' ? <Button onClick={() => setStep(3)}>Edit and try again</Button> : <div className="generation-spinner" />}</section>}
+    {step === 5 && job?.video && <section className="wizard-card wide video-result"><div className="panel-title"><div><span className="eyebrow">STEP 5 OF 5</span><h2>Your product video is ready</h2><p className="lead">Preview the final reel before adding it to Shopify.</p></div><Badge tone="success">Ready</Badge></div><video src={job.video.url} controls playsInline preload="metadata" /><div className="wizard-actions"><Button onClick={() => setStep(3)}>Adjust and create another</Button><Button variant="primary" loading={busy} disabled={Boolean(job.video.added_to_shopify_at)} onClick={publish}>{job.video.added_to_shopify_at ? `Added · ${job.video.shopify_status || 'processing'}` : 'Add to Shopify gallery →'}</Button></div></section>}
+    {toast && <Toast content={toast} onDismiss={() => setToast('')} />}
+  </div>;
+}
+
 function History({jobs}) {
   const [openJob, setOpenJob] = useState(null);
   const [lightboxImages, setLightboxImages] = useState([]);
@@ -626,19 +749,19 @@ function History({jobs}) {
   }
 
   return <div className="page"><PageHeader eyebrow="YOUR ARCHIVE" title="Generation history" description="Every creative set, ready to revisit." action={<Button variant="primary" url={shopifyTo('/generate')}>New generation</Button>} />
-    {jobs.length ? <div className="history-grid">{jobs.map(job => <article className="history-card" key={job.id}><div className="history-images">{job.images?.slice(0, 3).map(image => <img src={image.url} key={image.id} />)}</div><div className="history-copy"><div><span className="eyebrow">{new Date(job.created_at).toLocaleDateString()}</span><h3>{job.product.title}</h3><small>{job.images?.length} images · {job.credits_used} credits</small></div><Button onClick={() => setOpenJob(job)}>Open set</Button></div></article>)}</div> : <EmptyState heading="No generations yet" action={{content: 'Create images', url: '/generate'}} />}
+    {jobs.length ? <div className="history-grid">{jobs.map(job => <article className="history-card" key={job.id}><div className={job.kind === 'video' ? 'history-images history-video' : 'history-images'}>{job.kind === 'video' ? (job.video?.url ? <video src={job.video.url} muted playsInline preload="metadata" /> : <span className="job-placeholder">▶</span>) : job.images?.slice(0, 3).map(image => <img src={image.url} key={image.id} />)}</div><div className="history-copy"><div><span className="eyebrow">{new Date(job.created_at).toLocaleDateString()} · {job.kind}</span><h3>{job.product.title}</h3><small>{job.kind === 'video' ? job.video?.status : `${job.images?.length} images`} · {job.credits_used} credits</small></div><Button onClick={() => setOpenJob(job)}>Open {job.kind === 'video' ? 'video' : 'set'}</Button></div></article>)}</div> : <EmptyState heading="No generations yet" action={{content: 'Create images', url: '/generate'}} />}
     {openJob && <div className="prompt-modal-backdrop" onMouseDown={event => {
       if (event.target === event.currentTarget) setOpenJob(null);
     }}>
       <section className="prompt-modal history-set-modal" role="dialog" aria-modal="true" aria-labelledby="history-set-title">
         <header><div><span className="eyebrow">{new Date(openJob.created_at).toLocaleDateString()}</span><h2 id="history-set-title">{openJob.product.title}</h2></div><button className="prompt-modal-close" onClick={() => setOpenJob(null)} aria-label="Close image set">×</button></header>
-        <p>{openJob.images?.length || 0} generated images · {openJob.credits_used} credits used</p>
-        <div className="history-set-grid">{openJob.images?.filter(image => image.url).map((image, index) =>
+        <p>{openJob.kind === 'video' ? `Video ${openJob.video?.status}` : `${openJob.images?.length || 0} generated images`} · {openJob.credits_used} credits used</p>
+        {openJob.kind === 'video' && openJob.video?.url ? <video className="history-modal-video" src={openJob.video.url} controls playsInline /> : <div className="history-set-grid">{openJob.images?.filter(image => image.url).map((image, index) =>
           <button type="button" className="history-set-image" key={image.id} onClick={() => openImagePreview(openJob.images.filter(item => item.url).map(item => ({url: item.url})), index)}>
             <img src={image.url} alt="" />
             <span>{image.status}</span>
           </button>
-        )}</div>
+        )}</div>}
       </section>
     </div>}
     <ImageLightbox images={lightboxImages} initialIndex={lightboxIndex} onClose={() => {setLightboxIndex(null); setLightboxImages([]);}} />

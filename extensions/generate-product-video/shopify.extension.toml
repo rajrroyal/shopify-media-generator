@@ -1,0 +1,9 @@
+[[extensions]]
+name = "Generate video"
+handle = "generate-product-video"
+uid = "1a71bb8c3ee3a60d05a6fb76c076c12ae7cffa8e7df988c539f3765fc2a96d40"
+type = "admin_link"
+
+[[extensions.targeting]]
+target = "admin.product-details.action.link"
+url = "/generate-video"

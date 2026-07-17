@@ -110,6 +110,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
 
+FAL_KEY = os.getenv("FAL_KEY", "")
+VIDEO_MODELS = {
+    "preview": "fal-ai/wan/v2.2-a14b/image-to-video/turbo",
+    "quality": "fal-ai/wan/v2.2-a14b/image-to-video/turbo",
+    "premium": "fal-ai/minimax/hailuo-2.3-fast/standard/image-to-video",
+}
+FAL_WEBHOOK_SECRET = os.getenv("FAL_WEBHOOK_SECRET", SECRET_KEY)
+VIDEO_GENERATION_CREDITS = int(os.getenv("VIDEO_GENERATION_CREDITS", "10"))
+VIDEO_MAX_REFERENCES = int(os.getenv("VIDEO_MAX_REFERENCES", "5"))
+VIDEO_MAX_FILE_SIZE = int(os.getenv("VIDEO_MAX_FILE_SIZE", str(200 * 1024 * 1024)))
+
 CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"

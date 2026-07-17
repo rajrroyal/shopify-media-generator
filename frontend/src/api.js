@@ -96,6 +96,14 @@ export const api = {
   addToShopify: (jobId, imageIds) => request(`/generation/jobs/${jobId}/add-to-shopify/`, {
     method: 'POST', body: JSON.stringify({image_ids: imageIds}),
   }),
+  createVideoJob: (productId, sourceImages) => request('/generation/video-jobs/', {
+    method: 'POST', body: JSON.stringify({product_id: productId, source_images: sourceImages}),
+  }),
+  generateVideoPrompt: jobId => request(`/generation/video-jobs/${jobId}/generate-prompt/`, {method: 'POST'}),
+  generateVideo: (jobId, payload) => request(`/generation/video-jobs/${jobId}/generate/`, {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  addVideoToShopify: jobId => request(`/generation/video-jobs/${jobId}/add-to-shopify/`, {method: 'POST'}),
   plans: () => request('/billing/plans/'),
   subscribe: planId => request('/billing/subscribe/', {
     method: 'POST', body: JSON.stringify({plan_id: planId}),

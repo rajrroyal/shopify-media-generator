@@ -1,5 +1,5 @@
 [[extensions]]
-name = "Generate Images"
+name = "Generate images"
 handle = "generate-product-images"
 uid = "86e6c7c99c33a0f091778a33ea98a89650819e55eb637dc0469f"
 type = "admin_link"

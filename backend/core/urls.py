@@ -8,6 +8,10 @@ urlpatterns = [
     path("shopify/products/<str:product_id>/", views.ProductDetailView.as_view()),
     path("generation/jobs/", views.JobListCreateView.as_view()),
     path("generation/jobs/<uuid:job_id>/", views.JobDetailView.as_view()),
+    path("generation/video-jobs/", views.VideoJobCreateView.as_view()),
+    path("generation/video-jobs/<uuid:job_id>/generate-prompt/", views.GenerateVideoPromptView.as_view()),
+    path("generation/video-jobs/<uuid:job_id>/generate/", views.GenerateVideoView.as_view()),
+    path("generation/video-jobs/<uuid:job_id>/add-to-shopify/", views.AddVideoToShopifyView.as_view()),
     path("generation/jobs/<uuid:job_id>/generate-prompts/", views.GeneratePromptsView.as_view()),
     path("generation/jobs/<uuid:job_id>/generate-images/", views.GenerateImagesView.as_view()),
     path("generation/jobs/<uuid:job_id>/images/<int:image_id>/regenerate/", views.RegenerateImageView.as_view()),
@@ -24,6 +28,7 @@ urlpatterns = [
     path("auth/shopify/", views.oauth_start),
     path("auth/shopify/callback/", views.oauth_callback),
     path("webhooks/app-uninstalled/", views.app_uninstalled),
+    path("webhooks/fal/video/", views.fal_video_webhook),
     path(
         "webhooks/app-purchases-one-time-update/",
         views.app_purchase_one_time_updated,

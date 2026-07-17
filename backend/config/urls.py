@@ -8,7 +8,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("core.urls")),
     re_path(
-        r"^(?P<path>(?:products|history|billing|generate(?:/[^/]+)?))/?$",
+        r"^(?P<path>(?:products|history|billing|generate(?:/[^/]+)?|generate-video(?:/[^/]+)?))/?$",
         core_views.frontend_spa_redirect,
     ),
 ]

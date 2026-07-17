@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import CreditPack, GeneratedImage, GeneratedPrompt, GenerationJob, Shop, SubscriptionPlan
+from .models import CreditPack, GeneratedImage, GeneratedPrompt, GeneratedVideo, GenerationJob, Shop, SubscriptionPlan
 
 
 class ShopSerializer(serializers.ModelSerializer):
@@ -54,16 +54,34 @@ class ImageSerializer(serializers.ModelSerializer):
         ]
 
 
+class VideoSerializer(serializers.ModelSerializer):
+    url = serializers.CharField(source="resolved_url", read_only=True)
+    credit_cost = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GeneratedVideo
+        fields = [
+            "id", "title", "prompt", "status", "url", "thumbnail_url", "settings",
+            "error_message", "shopify_media_id", "shopify_status", "added_to_shopify_at",
+            "credit_cost", "created_at", "updated_at",
+        ]
+
+    def get_credit_cost(self, obj):
+        from django.conf import settings
+        return settings.VIDEO_GENERATION_CREDITS
+
+
 class JobSerializer(serializers.ModelSerializer):
     product = serializers.JSONField(source="product_data", read_only=True)
     prompts = PromptSerializer(many=True, read_only=True)
     images = ImageSerializer(many=True, read_only=True)
+    video = VideoSerializer(read_only=True)
 
     class Meta:
         model = GenerationJob
         fields = [
-            "id", "product", "status", "source_images", "credits_used",
-            "error_message", "prompts", "images", "created_at", "updated_at",
+            "id", "kind", "product", "status", "source_images", "credits_used",
+            "error_message", "prompts", "images", "video", "created_at", "updated_at",
         ]
 
 
@@ -84,3 +102,11 @@ class GenerateImagesSerializer(serializers.Serializer):
 
 class ImageSelectionSerializer(serializers.Serializer):
     image_ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=False)
+
+
+class GenerateVideoSerializer(serializers.Serializer):
+    prompt = serializers.CharField(max_length=4000)
+    duration = serializers.ChoiceField(choices=["6", "10"], default="6")
+    quality = serializers.ChoiceField(
+        choices=["preview", "quality", "premium"], default="quality"
+    )

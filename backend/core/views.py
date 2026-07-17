@@ -4,6 +4,7 @@ from datetime import timedelta
 from urllib.parse import urlencode
 
 from django.conf import settings
+from django.db.models import Q
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -18,6 +19,7 @@ from .models import (
     CreditPurchase,
     GeneratedImage,
     GeneratedPrompt,
+    GeneratedVideo,
     GenerationJob,
     Shop,
     SubscriptionPlan,
@@ -26,13 +28,15 @@ from .serializers import (
     CreditPackSerializer,
     CreateJobSerializer,
     GenerateImagesSerializer,
+    GenerateVideoSerializer,
     ImageSelectionSerializer,
     JobSerializer,
     ShopSerializer,
     SubscriptionPlanSerializer,
 )
-from .services.credits import reserve_credits, update_credit_purchase
+from .services.credits import refund_credit, reserve_credits, update_credit_purchase
 from .services.prompts import generate_prompt_ideas
+from .services.videos import complete_video, fail_video, generate_video_prompt, refresh_video, submit_video
 from .services.shopify import (
     ShopifyClient,
     ShopifyReauthorizationRequired,
@@ -125,9 +129,17 @@ class MeView(APIView):
             created_at__year=timezone.now().year,
             created_at__month=timezone.now().month,
         ).count()
+        payload["videos_this_month"] = GeneratedVideo.objects.filter(
+            job__shop=request.user,
+            status=GeneratedVideo.Status.COMPLETED,
+            created_at__year=timezone.now().year,
+            created_at__month=timezone.now().month,
+        ).count()
         payload["products_enhanced"] = GenerationJob.objects.filter(
             shop=request.user,
-            images__added_to_shopify_at__isnull=False,
+        ).filter(
+            Q(images__added_to_shopify_at__isnull=False)
+            | Q(video__added_to_shopify_at__isnull=False)
         ).values("shopify_product_id").distinct().count()
         payload["shop_name"] = shop_name
         payload["credit_limit"] = request.user.plan.monthly_credits if request.user.plan else 0
@@ -200,7 +212,123 @@ class JobDetailView(APIView):
             pk=job_id,
             shop=request.user,
         )
+        if job.kind == GenerationJob.Kind.VIDEO and hasattr(job, "video"):
+            try:
+                refresh_video(job.video)
+            except Exception:
+                pass
         return Response(JobSerializer(job, context={"request": request}).data)
+
+
+class VideoJobCreateView(APIView):
+    def post(self, request):
+        serializer = CreateJobSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            product = ShopifyClient(request.user).fetch_product(serializer.validated_data["product_id"])
+        except ShopifyReauthorizationRequired:
+            raise
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=404)
+        except Exception as exc:
+            return Response({"detail": f"Could not load product from Shopify: {exc}"}, status=502)
+        allowed = {item.get("url") for item in product.get("images", [])}
+        sources = serializer.validated_data["source_images"]
+        if not sources:
+            return Response({"detail": "Select at least one product image."}, status=400)
+        if len(sources) > settings.VIDEO_MAX_REFERENCES:
+            return Response({"detail": f"Select at most {settings.VIDEO_MAX_REFERENCES} images."}, status=400)
+        if any(url not in allowed for url in sources):
+            return Response({"detail": "Reference images must belong to the selected product."}, status=400)
+        job = GenerationJob.objects.create(
+            shop=request.user, shopify_product_id=product["shopify_product_id"],
+            product_data=product, source_images=sources, kind=GenerationJob.Kind.VIDEO,
+        )
+        GeneratedVideo.objects.create(job=job)
+        return Response(JobSerializer(job, context={"request": request}).data, status=201)
+
+
+class GenerateVideoPromptView(APIView):
+    def post(self, request, job_id):
+        job = get_object_or_404(GenerationJob, pk=job_id, shop=request.user, kind=GenerationJob.Kind.VIDEO)
+        try:
+            result = generate_video_prompt(job.product_data, job.source_images)
+        except Exception as exc:
+            return Response({"detail": f"Could not generate the video prompt: {exc}"}, status=502)
+        video = job.video
+        video.title, video.prompt = result["title"], result["prompt"]
+        video.save(update_fields=["title", "prompt", "updated_at"])
+        job.status = GenerationJob.Status.PROMPTS_READY
+        job.save(update_fields=["status"])
+        return Response(JobSerializer(job, context={"request": request}).data)
+
+
+class GenerateVideoView(APIView):
+    def post(self, request, job_id):
+        job = get_object_or_404(GenerationJob, pk=job_id, shop=request.user, kind=GenerationJob.Kind.VIDEO)
+        video = job.video
+        if video.status not in {GeneratedVideo.Status.DRAFT, GeneratedVideo.Status.FAILED}:
+            return Response({"detail": "This video has already been submitted."}, status=409)
+        serializer = GenerateVideoSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        cost = settings.VIDEO_GENERATION_CREDITS
+        try:
+            reserve_credits(job, cost, reason="AI video generation")
+            video.prompt = serializer.validated_data["prompt"]
+            video.settings = {
+                "duration": serializer.validated_data["duration"],
+                "quality": serializer.validated_data["quality"],
+            }
+            video.error_message = ""
+            video.status = GeneratedVideo.Status.DRAFT
+            video.save(update_fields=[
+                "prompt", "settings", "error_message", "status", "updated_at"
+            ])
+            if not settings.BACKEND_URL:
+                raise RuntimeError("BACKEND_URL is required for fal.ai webhooks.")
+            webhook = (
+                f"{settings.BACKEND_URL}/api/webhooks/fal/video/"
+                f"?token={settings.FAL_WEBHOOK_SECRET}"
+            )
+            submit_video(video, webhook)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except Exception as exc:
+            fail_video(video, exc)
+            return Response({"detail": f"Could not submit video generation: {exc}"}, status=502)
+        job.status = GenerationJob.Status.QUEUED
+        job.save(update_fields=["status"])
+        return Response(JobSerializer(job, context={"request": request}).data, status=202)
+
+
+class AddVideoToShopifyView(APIView):
+    def post(self, request, job_id):
+        job = get_object_or_404(GenerationJob, pk=job_id, shop=request.user, kind=GenerationJob.Kind.VIDEO)
+        if job.video.status != GeneratedVideo.Status.COMPLETED:
+            return Response({"detail": "The video is not ready."}, status=400)
+        try:
+            ShopifyClient(request.user).attach_video(job, job.video)
+        except ShopifyReauthorizationRequired:
+            raise
+        except Exception as exc:
+            return Response({"detail": f"Could not add video to Shopify: {exc}"}, status=502)
+        return Response(JobSerializer(job, context={"request": request}).data)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.AllowAny])
+def fal_video_webhook(request):
+    if not settings.FAL_WEBHOOK_SECRET or request.query_params.get("token") != settings.FAL_WEBHOOK_SECRET:
+        return Response({"detail": "Invalid webhook token."}, status=401)
+    request_id = request.data.get("request_id")
+    video = GeneratedVideo.objects.filter(provider_request_id=request_id).select_related("job").first()
+    if not video:
+        return Response({"detail": "Unknown request."}, status=404)
+    try:
+        complete_video(video, request.data)
+    except Exception as exc:
+        fail_video(video, exc)
+    return Response({"ok": True})
 
 
 class GeneratePromptsView(APIView):

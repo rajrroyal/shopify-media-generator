@@ -15,10 +15,18 @@ log = logging.getLogger(__name__)
 def _cap_dimensions(width, height, max_dim):
     if not width or not height:
         return max_dim, max_dim
-    if width <= max_dim and height <= max_dim:
-        return width, height
-    scale = min(max_dim / float(width), max_dim / float(height))
-    return max(64, int(width * scale)), max(64, int(height * scale))
+    if width > max_dim or height > max_dim:
+        scale = min(max_dim / float(width), max_dim / float(height))
+        width, height = int(width * scale), int(height * scale)
+
+    # GPT Image custom dimensions must be multiples of 16. Choose the nearest
+    # valid dimensions without exceeding the configured maximum.
+    aligned_max = max(64, (max_dim // 16) * 16)
+
+    def align(value):
+        return min(aligned_max, max(64, ((int(value) + 8) // 16) * 16))
+
+    return align(width), align(height)
 
 
 def generate_image(image):
